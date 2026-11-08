@@ -9,7 +9,7 @@ use ImageConverter\OutputFormat;
 
 $apiToken = getenv('APIFY_API_TOKEN') ?: getenv('APIFY_TOKEN') ?: 'your_apify_api_token';
 
-$client = new Client($apiToken);
+$client = (new Client)->setApifyKey($apiToken);
 
 $url = 'https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png';
 

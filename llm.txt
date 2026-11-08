@@ -8,16 +8,17 @@ Key facts:
 - PHP: ^8.3, Guzzle ^7
 - Namespace: `ImageConverter`
 - Entry class: `ImageConverter\Client`
-- Auth: Apify API token, passed as first constructor argument
+- Auth: Apify API token, set via `Client::setApifyKey()`, falls back to env `APIFY_API_TOKEN` or `APIFY_TOKEN`
 
 ## Docs
 - [README](https://github.com/bitesizedinsights/bulk-image-converter-compressor-php/blob/master/README.md): usage
 - [Actor](https://apify.com/bite-sized-insights/bulk-image-converter-compressor-and-resizer): the underlying Apify Actor
 
 ## API
-- `Client::__construct(string $apiToken, ?Config $config = null, ?GuzzleHttp\ClientInterface $http = null)`
+- `Client::__construct(?Config $config = null, ?GuzzleHttp\ClientInterface $http = null)`
+- `Client::setApifyKey(string $apiKey): static` - sets the Apify API key; without it `APIFY_API_TOKEN` or `APIFY_TOKEN` is read from the environment, and `MissingApiKeyException` is thrown on the first API call if neither is set
 - `Client::convert(array $urls = [], OutputFormat $outputFormat = OutputFormat::WebP, int $quality = 80, ?int $maxWidth = null, ?int $maxHeight = null, ?bool $keepAspectRatio = null, ?bool $stripMetadata = null, ?string $backgroundColor = null, array $uploadKeys = [], ?string $uploadStoreName = null): ConvertedImage[]` - one run for all images (1-1000 in total from urls and uploadKeys), waits for it, returns one ConvertedImage per image; null options are not sent
-- `Config(string $apiToken, string $actorId = 'bite-sized-insights/bulk-image-converter-compressor-and-resizer', string $baseUrl = 'https://api.apify.com/v2', int $timeout = 600, int $requestTimeout = 90)`
+- `Config(string $actorId = 'bite-sized-insights/bulk-image-converter-compressor-and-resizer', string $baseUrl = 'https://api.apify.com/v2', int $timeout = 600, int $requestTimeout = 90)`
 - DTOs (all `final readonly`, `fromArray(array)`):
   - `ConvertedImage`: index: int, source: string, sourceType: SourceType, status: ConversionStatus, outputUrl: ?string, outputKey: ?string, sourceFormat: ?string, outputFormat: ?string, sourceBytes: ?int, outputBytes: ?int, bytesSaved: ?int, savedPercent: ?float, sourceWidth: ?int, sourceHeight: ?int, outputWidth: ?int, outputHeight: ?int, error: ?string; helpers isSuccessful(), isFailed(), isLarger(), wasResized()
 - Enums:
@@ -35,7 +36,7 @@ Key facts:
 use ImageConverter\Client;
 use ImageConverter\OutputFormat;
 
-$client = new Client(getenv('APIFY_API_TOKEN'));
+$client = (new Client())->setApifyKey(getenv('APIFY_API_TOKEN'));
 $images = $client->convert(['https://example.com/photo.png'], outputFormat: OutputFormat::WebP, quality: 80, maxWidth: 1600);
 
 foreach ($images as $image) {

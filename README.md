@@ -24,7 +24,7 @@ use ImageConverter\Client;
 
 $apiToken = getenv('APIFY_API_TOKEN') ?: getenv('APIFY_TOKEN') ?: 'your_apify_api_token';
 
-$client = new Client($apiToken);
+$client = (new Client())->setApifyKey($apiToken);
 
 $images = $client->convert(['https://www.python.org/static/img/python-logo.png']);
 
@@ -38,6 +38,8 @@ foreach ($images as $image) {
     printf("%d -> %d bytes (%.1f%% saved)\n%s\n", $image->sourceBytes, $image->outputBytes, $image->savedPercent, $image->outputUrl);
 }
 ```
+
+The API key is set with `setApifyKey()`. If you skip it, the client reads `APIFY_API_TOKEN` or `APIFY_TOKEN` from the environment and throws `MissingApiKeyException` on the first API call when neither is set.
 
 You need an Apify account ([sign up](https://console.apify.com/sign-up), new accounts include free monthly credit) and an [API token](https://console.apify.com/account/integrations). Conversion costs from $0.0081 per image, see [Pricing](#pricing-cost-per-converted-image).
 
@@ -133,14 +135,15 @@ $images = $client->convert(
 ```php
 use ImageConverter\Config;
 
-$client = new Client($apiToken, new Config(apiToken: $apiToken, timeout: 300, requestTimeout: 60));
+$client = (new Client(new Config(timeout: 300, requestTimeout: 60)))->setApifyKey($apiToken);
 ```
 
-`timeout` is the longest wait for a run in seconds (default 600), `requestTimeout` limits a single HTTP request (default 90). `actorId` and `baseUrl` can be overridden, for example to use a copy of the Actor. Pass a Guzzle client as the third constructor argument to customize HTTP behavior.
+`timeout` is the longest wait for a run in seconds (default 600), `requestTimeout` limits a single HTTP request (default 90). `actorId` and `baseUrl` can be overridden, for example to use a copy of the Actor. Pass a Guzzle client as the second constructor argument to customize HTTP behavior.
 
 ## Error Handling for PHP Image Conversion
 
 - `InvalidArgumentException`: no images, more than 1000, quality outside 1 to 100, sizes outside 0 to 16000 or an invalid color.
+- `MissingApiKeyException` (extends `ApiException`): no key via `setApifyKey()` and neither `APIFY_API_TOKEN` nor `APIFY_TOKEN` is set.
 - `RateLimitException` (extends `ApiException`): HTTP 429; `$e->retryAfter` holds the advised seconds.
 - `ApiException`: failed requests, malformed responses, a failed, aborted or timed-out run, a run that does not finish within `timeout`, or a dataset item that cannot be mapped (the message names its index).
 - Single bad images never throw: they come back as `failed` rows.

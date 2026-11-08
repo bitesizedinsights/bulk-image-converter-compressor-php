@@ -8,7 +8,7 @@ use ImageConverter\Client;
 
 $apiToken = getenv('APIFY_API_TOKEN') ?: getenv('APIFY_TOKEN') ?: 'your_apify_api_token';
 
-$client = new Client($apiToken);
+$client = (new Client)->setApifyKey($apiToken);
 
 $images = $client->convert(['https://www.python.org/static/img/python-logo.png']);
 

@@ -9,7 +9,7 @@ use ImageConverter\OutputFormat;
 
 $apiToken = getenv('APIFY_API_TOKEN') ?: getenv('APIFY_TOKEN') ?: 'your_apify_api_token';
 
-$client = new Client($apiToken);
+$client = (new Client)->setApifyKey($apiToken);
 
 // Shrink to at most 800x600 pixels (never enlarged) and trade some quality for size
 $images = $client->convert(

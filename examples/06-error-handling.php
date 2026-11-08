@@ -10,7 +10,7 @@ use ImageConverter\Exception\RateLimitException;
 
 $apiToken = getenv('APIFY_API_TOKEN') ?: getenv('APIFY_TOKEN') ?: 'your_apify_api_token';
 
-$client = new Client($apiToken);
+$client = (new Client)->setApifyKey($apiToken);
 
 try {
     $images = $client->convert([

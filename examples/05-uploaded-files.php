@@ -9,7 +9,7 @@ use ImageConverter\OutputFormat;
 
 $apiToken = getenv('APIFY_API_TOKEN') ?: getenv('APIFY_TOKEN') ?: 'your_apify_api_token';
 
-$client = new Client($apiToken);
+$client = (new Client)->setApifyKey($apiToken);
 
 // Files you uploaded to a key-value store, for example iPhone photos in HEIC format
 $images = $client->convert(
