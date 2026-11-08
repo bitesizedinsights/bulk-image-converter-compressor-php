@@ -1,0 +1,19 @@
+{
+    "index": 2,
+    "source": "https://example.com/not-an-image.html",
+    "sourceType": "url",
+    "status": "failed",
+    "outputUrl": null,
+    "outputKey": null,
+    "sourceFormat": null,
+    "outputFormat": null,
+    "sourceBytes": null,
+    "outputBytes": null,
+    "bytesSaved": null,
+    "savedPercent": null,
+    "sourceWidth": null,
+    "sourceHeight": null,
+    "outputWidth": null,
+    "outputHeight": null,
+    "error": "The file is not a supported or readable image."
+}

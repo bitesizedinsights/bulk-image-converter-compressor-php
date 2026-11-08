@@ -1,0 +1,19 @@
+{
+    "index": 1,
+    "source": "https://www.python.org/static/img/python-logo.png",
+    "sourceType": "url",
+    "status": "success",
+    "outputUrl": "https://api.apify.com/v2/key-value-stores/xxxxxxxxxxxxxxxxx/records/00001-python-logo.webp",
+    "outputKey": "00001-python-logo.webp",
+    "sourceFormat": "png",
+    "outputFormat": "webp",
+    "sourceBytes": 15770,
+    "outputBytes": 6178,
+    "bytesSaved": 9592,
+    "savedPercent": 60.8,
+    "sourceWidth": 601,
+    "sourceHeight": 203,
+    "outputWidth": 601,
+    "outputHeight": 203,
+    "error": null
+}
