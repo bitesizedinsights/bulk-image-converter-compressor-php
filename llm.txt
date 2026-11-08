@@ -1,0 +1,44 @@
+# Bulk Image Converter Compressor PHP
+
+> PHP client for bulk image conversion, compression and resizing (WebP, AVIF, JPEG, PNG, HEIC input) via Apify, returns typed DTOs.
+
+Key facts:
+- Package: `bitesizedinsights/bulk-image-converter-compressor`
+- Install: `composer require bitesizedinsights/bulk-image-converter-compressor`
+- PHP: ^8.3, Guzzle ^7
+- Namespace: `ImageConverter`
+- Entry class: `ImageConverter\Client`
+- Auth: Apify API token, passed as first constructor argument
+
+## Docs
+- [README](https://github.com/bitesizedinsights/bulk-image-converter-compressor-php/blob/master/README.md): usage
+- [Actor](https://apify.com/bite-sized-insights/bulk-image-converter-compressor-and-resizer): the underlying Apify Actor
+
+## API
+- `Client::__construct(string $apiToken, ?Config $config = null, ?GuzzleHttp\ClientInterface $http = null)`
+- `Client::convert(array $urls = [], OutputFormat $outputFormat = OutputFormat::WebP, int $quality = 80, ?int $maxWidth = null, ?int $maxHeight = null, ?bool $keepAspectRatio = null, ?bool $stripMetadata = null, ?string $backgroundColor = null, array $uploadKeys = [], ?string $uploadStoreName = null): ConvertedImage[]` - one run for all images (1-1000 in total from urls and uploadKeys), waits for it, returns one ConvertedImage per image; null options are not sent
+- `Config(string $apiToken, string $actorId = 'bite-sized-insights/bulk-image-converter-compressor-and-resizer', string $baseUrl = 'https://api.apify.com/v2', int $timeout = 600, int $requestTimeout = 90)`
+- DTOs (all `final readonly`, `fromArray(array)`):
+  - `ConvertedImage`: index: int, source: string, sourceType: SourceType, status: ConversionStatus, outputUrl: ?string, outputKey: ?string, sourceFormat: ?string, outputFormat: ?string, sourceBytes: ?int, outputBytes: ?int, bytesSaved: ?int, savedPercent: ?float, sourceWidth: ?int, sourceHeight: ?int, outputWidth: ?int, outputHeight: ?int, error: ?string; helpers isSuccessful(), isFailed(), isLarger(), wasResized()
+- Enums:
+  - `OutputFormat`: WebP ('webp'), Jpeg ('jpeg'), Png ('png'), Avif ('avif'), Original ('original'), Gif ('gif'), Tiff ('tiff'), Bmp ('bmp')
+  - `ConversionStatus`: Success, Failed
+  - `SourceType`: Url, Upload
+- Exceptions:
+  - `InvalidArgumentException`: no images, more than 1000, quality outside 1-100, maxWidth/maxHeight outside 0-16000, invalid backgroundColor
+  - `ImageConverter\Exception\ApiException`: failed request, malformed response, failed/aborted/timed-out run, run not finished within Config::$timeout, unmappable dataset item
+  - `ImageConverter\Exception\RateLimitException` (extends ApiException): HTTP 429, property retryAfter (seconds)
+- Single bad images do not throw; they are returned with status Failed and an error message.
+
+## Example
+```php
+use ImageConverter\Client;
+use ImageConverter\OutputFormat;
+
+$client = new Client(getenv('APIFY_API_TOKEN'));
+$images = $client->convert(['https://example.com/photo.png'], outputFormat: OutputFormat::WebP, quality: 80, maxWidth: 1600);
+
+foreach ($images as $image) {
+    echo $image->isSuccessful() ? $image->outputUrl : $image->error, "\n";
+}
+```
