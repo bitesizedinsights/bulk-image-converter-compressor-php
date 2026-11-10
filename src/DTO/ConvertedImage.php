@@ -8,8 +8,9 @@ use ImageConverter\ConversionStatus;
 use ImageConverter\SourceType;
 use ImageConverter\Support\Value;
 use InvalidArgumentException;
+use JsonSerializable;
 
-final readonly class ConvertedImage
+final readonly class ConvertedImage implements JsonSerializable
 {
     public function __construct(
         public int $index,
@@ -58,6 +59,40 @@ final readonly class ConvertedImage
             outputHeight: Value::nullableInt($data, 'outputHeight'),
             error: Value::nullableString($data, 'error'),
         );
+    }
+
+    /**
+     * The Actor's dataset item shape (camelCase keys), so fromArray(toArray()) restores an equal object.
+     *
+     * @return array<string, mixed>
+     */
+    public function toArray(): array
+    {
+        return [
+            'index' => $this->index,
+            'source' => $this->source,
+            'sourceType' => $this->sourceType->value,
+            'status' => $this->status->value,
+            'outputUrl' => $this->outputUrl,
+            'outputKey' => $this->outputKey,
+            'sourceFormat' => $this->sourceFormat,
+            'outputFormat' => $this->outputFormat,
+            'sourceBytes' => $this->sourceBytes,
+            'outputBytes' => $this->outputBytes,
+            'bytesSaved' => $this->bytesSaved,
+            'savedPercent' => $this->savedPercent,
+            'sourceWidth' => $this->sourceWidth,
+            'sourceHeight' => $this->sourceHeight,
+            'outputWidth' => $this->outputWidth,
+            'outputHeight' => $this->outputHeight,
+            'error' => $this->error,
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    public function jsonSerialize(): array
+    {
+        return $this->toArray();
     }
 
     public function isSuccessful(): bool

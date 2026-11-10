@@ -79,3 +79,21 @@ test('wrong field types are rejected', function () {
     expect(fn () => ConvertedImage::fromArray([...loadFixture('image_success'), 'sourceBytes' => 'big']))
         ->toThrow(InvalidArgumentException::class, 'sourceBytes');
 });
+
+test('image round trips through toArray and json', function (string $fixture) {
+    $image = ConvertedImage::fromArray(loadFixture($fixture));
+
+    $viaArray = ConvertedImage::fromArray($image->toArray());
+    $viaJson = ConvertedImage::fromArray(json_decode(json_encode($image, JSON_THROW_ON_ERROR), true));
+
+    expect($viaArray)->toEqual($image)
+        ->and($viaJson)->toEqual($image);
+})->with(['image_success', 'image_failed', 'image_minimal']);
+
+test('toArray uses the Actor field names', function () {
+    $array = ConvertedImage::fromArray(loadFixture('image_success'))->toArray();
+
+    expect($array)->toHaveKeys(['sourceType', 'outputUrl', 'bytesSaved', 'savedPercent', 'outputHeight'])
+        ->and($array['sourceType'])->toBe('url')
+        ->and($array['status'])->toBe('success');
+});

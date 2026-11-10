@@ -112,6 +112,15 @@ Helpers: `isSuccessful()`, `isFailed()`, `isLarger()` (new file is bigger than t
 
 </details>
 
+### Store and Restore Results
+
+`ConvertedImage` implements `JsonSerializable` and has `toArray()`. The array uses the Actor's field names (`sourceType`, `outputUrl`, ...), so `fromArray()` restores an equal object:
+
+```php
+$json = json_encode($image);                                  // database column, cache, queue payload
+$restored = ConvertedImage::fromArray(json_decode($json, true)); // same data again
+```
+
 ## Convert HEIC and Uploaded Photos to JPEG in PHP
 
 Upload files to an Apify key-value store and pass their record keys. Read formats include HEIC and HEIF from iPhones.
