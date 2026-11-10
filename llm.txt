@@ -26,7 +26,7 @@ Key facts:
   - `ConversionStatus`: Success, Failed
   - `SourceType`: Url, Upload
 - Exceptions:
-  - `InvalidArgumentException`: no images, more than 1000, quality outside 1-100, maxWidth/maxHeight outside 0-16000, invalid backgroundColor
+  - `InvalidArgumentException`: no images, more than 1000, url >2048 chars, uploadKey >256 chars, uploadStoreName >63 chars, quality outside 1-100, maxWidth/maxHeight outside 0-16000, invalid backgroundColor
   - `ImageConverter\Exception\ApiException`: failed request, malformed response, failed/aborted/timed-out run, run not finished within Config::$timeout, unmappable dataset item
   - `ImageConverter\Exception\RateLimitException` (extends ApiException): HTTP 429, property retryAfter (seconds)
 - Single bad images do not throw; they are returned with status Failed and an error message.

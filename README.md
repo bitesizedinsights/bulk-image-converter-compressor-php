@@ -89,7 +89,7 @@ Converting 100 images on the free plan costs about $1.25, or about $8.11 for 1,0
 | `uploadKeys` | `list<string>` | `[]` | Keys of files you uploaded to a key-value store |
 | `uploadStoreName` | `?string` | `null` | Store holding the uploaded files; `null` = the run's default store |
 
-At least one URL or upload key is required, up to 1000 images per run. Arguments outside these limits throw `InvalidArgumentException` before any request is made. Options left at `null` are not sent, so the Actor defaults apply.
+At least one URL or upload key is required, up to 1000 images per run. URLs may be at most 2048 characters, upload keys 256 and `uploadStoreName` 63. Arguments outside these limits throw `InvalidArgumentException` before any request is made. Options left at `null` are not sent, so the Actor defaults apply.
 
 <details>
 <summary>ConvertedImage fields</summary>
@@ -156,7 +156,7 @@ $client = (new Client(new Config(maxRetries: 5, retryBaseDelay: 2.0, retryMaxDel
 
 ## Error Handling for PHP Image Conversion
 
-- `InvalidArgumentException`: no images, more than 1000, quality outside 1 to 100, sizes outside 0 to 16000 or an invalid color.
+- `InvalidArgumentException`: no images, more than 1000, a URL over 2048 characters, an upload key over 256, a store name over 63, quality outside 1 to 100, sizes outside 0 to 16000 or an invalid color.
 - `MissingApiKeyException` (extends `ApiException`): no key via `setApifyKey()` and neither `APIFY_API_TOKEN` nor `APIFY_TOKEN` is set.
 - `RateLimitException` (extends `ApiException`): HTTP 429; `$e->retryAfter` holds the advised seconds.
 - `ApiException`: failed requests, malformed responses, a failed, aborted or timed-out run, a run that does not finish within `timeout`, or a dataset item that cannot be mapped (the message names its index).

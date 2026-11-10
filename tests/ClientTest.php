@@ -116,6 +116,12 @@ test('invalid arguments are rejected before any request', function (array $args,
 })->with([
     'no images' => [[], 'at least one image'],
     'too many images' => [['urls' => array_fill(0, 1001, 'https://example.com/a.png')], 'At most 1000'],
+    'url too long' => [['urls' => ['https://example.com/'.str_repeat('a', 2029)]], 'urls[0] must be at most 2048'],
+    'upload key too long' => [['uploadKeys' => ['ok', str_repeat('k', 257)]], 'uploadKeys[1] must be at most 256'],
+    'store name too long' => [
+        ['uploadKeys' => ['a.png'], 'uploadStoreName' => str_repeat('s', 64)],
+        'uploadStoreName must be at most 63',
+    ],
     'quality zero' => [['urls' => ['https://example.com/a.png'], 'quality' => 0], 'Quality'],
     'quality 101' => [['urls' => ['https://example.com/a.png'], 'quality' => 101], 'Quality'],
     'width too big' => [['urls' => ['https://example.com/a.png'], 'maxWidth' => 16001], 'maxWidth'],
@@ -456,4 +462,17 @@ test('4xx other than 429 is never retried', function () {
 
     expect(fn () => $client->convert(['https://example.com/a.png']))->toThrow(ApiException::class, 'status 401')
         ->and($history)->toHaveCount(1);
+});
+
+test('string length limits are inclusive and count characters', function () {
+    $history = [];
+    $client = makeClient([runResponse(), jsonResponse(200, [])], $history);
+
+    $client->convert(
+        ['https://example.com/'.str_repeat('a', 2028)],
+        uploadKeys: [str_repeat('é', 256)],
+        uploadStoreName: str_repeat('s', 63),
+    );
+
+    expect($history)->toHaveCount(2);
 });

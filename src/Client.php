@@ -94,7 +94,7 @@ final class Client
         array $uploadKeys = [],
         ?string $uploadStoreName = null,
     ): array {
-        $this->validate($urls, $uploadKeys, $quality, $maxWidth, $maxHeight, $backgroundColor);
+        $this->validate($urls, $uploadKeys, $quality, $maxWidth, $maxHeight, $backgroundColor, $uploadStoreName);
 
         $input = [
             'outputFormat' => $outputFormat->value,
@@ -135,6 +135,7 @@ final class Client
         ?int $maxWidth,
         ?int $maxHeight,
         ?string $backgroundColor,
+        ?string $uploadStoreName = null,
     ): void {
         $total = count($urls) + count($uploadKeys);
 
@@ -144,6 +145,18 @@ final class Client
 
         if ($total > self::MAX_IMAGES) {
             throw new InvalidArgumentException('At most '.self::MAX_IMAGES.' images per run are allowed');
+        }
+
+        foreach (['urls' => [$urls, 2048], 'uploadKeys' => [$uploadKeys, 256]] as $name => [$items, $max]) {
+            foreach ($items as $i => $item) {
+                if ($this->length($item) > $max) {
+                    throw new InvalidArgumentException("{$name}[{$i}] must be at most {$max} characters long");
+                }
+            }
+        }
+
+        if ($uploadStoreName !== null && $this->length($uploadStoreName) > 63) {
+            throw new InvalidArgumentException('uploadStoreName must be at most 63 characters long');
         }
 
         if ($quality < 1 || $quality > 100) {
@@ -159,6 +172,14 @@ final class Client
         if ($backgroundColor !== null && preg_match('/^#[0-9a-fA-F]{6}$/', $backgroundColor) !== 1) {
             throw new InvalidArgumentException('backgroundColor must be a hex color like #ffffff');
         }
+    }
+
+    /** Length in characters (code points), as the Actor's JSON schema counts them. */
+    private function length(string $value): int
+    {
+        $count = preg_match_all('/./su', $value);
+
+        return $count === false ? strlen($value) : $count;
     }
 
     /**
