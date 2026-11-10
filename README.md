@@ -140,6 +140,20 @@ $client = (new Client(new Config(timeout: 300, requestTimeout: 60)))->setApifyKe
 
 `timeout` is the longest wait for a run in seconds (default 600), `requestTimeout` limits a single HTTP request (default 90). `actorId` and `baseUrl` can be overridden, for example to use a copy of the Actor. Pass a Guzzle client as the second constructor argument to customize HTTP behavior.
 
+## Retries and Backoff
+
+Failed requests are retried automatically, by default up to 3 times with exponential backoff (1 s, 2 s, 4 s, each with 50 to 100 percent jitter, at most 30 s):
+
+- **Rate limits (429):** retried after at least the `Retry-After` time, given as seconds or as an HTTP date. Without the header plain backoff is used. If the server asks for more than `retryMaxDelay`, a `RateLimitException` is thrown right away.
+- **Server errors (5xx) and connection failures:** retried for reading results and polling.
+- **Starting a run:** only retried after a 429 or a failed connection. After a 5xx or a timeout the run may already exist, and a repeat would be billed twice, so the error is thrown instead.
+- **Other errors (4xx):** never retried.
+
+```php
+$client = (new Client(new Config(maxRetries: 5, retryBaseDelay: 2.0, retryMaxDelay: 60.0)))->setApifyKey($apiToken);
+// new Config(maxRetries: 0) turns retrying off
+```
+
 ## Error Handling for PHP Image Conversion
 
 - `InvalidArgumentException`: no images, more than 1000, quality outside 1 to 100, sizes outside 0 to 16000 or an invalid color.

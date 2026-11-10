@@ -15,10 +15,10 @@ Key facts:
 - [Actor](https://apify.com/bite-sized-insights/bulk-image-converter-compressor-and-resizer): the underlying Apify Actor
 
 ## API
-- `Client::__construct(?Config $config = null, ?GuzzleHttp\ClientInterface $http = null)`
+- `Client::__construct(?Config $config = null, ?GuzzleHttp\ClientInterface $http = null, ?Closure $sleeper = null)`
 - `Client::setApifyKey(string $apiKey): static` - sets the Apify API key; without it `APIFY_API_TOKEN` or `APIFY_TOKEN` is read from the environment, and `MissingApiKeyException` is thrown on the first API call if neither is set
 - `Client::convert(array $urls = [], OutputFormat $outputFormat = OutputFormat::WebP, int $quality = 80, ?int $maxWidth = null, ?int $maxHeight = null, ?bool $keepAspectRatio = null, ?bool $stripMetadata = null, ?string $backgroundColor = null, array $uploadKeys = [], ?string $uploadStoreName = null): ConvertedImage[]` - one run for all images (1-1000 in total from urls and uploadKeys), waits for it, returns one ConvertedImage per image; null options are not sent
-- `Config(string $actorId = 'bite-sized-insights/bulk-image-converter-compressor-and-resizer', string $baseUrl = 'https://api.apify.com/v2', int $timeout = 600, int $requestTimeout = 90)`
+- `Config(string $actorId = 'bite-sized-insights/bulk-image-converter-compressor-and-resizer', string $baseUrl = 'https://api.apify.com/v2', int $timeout = 600, int $requestTimeout = 90, int $maxRetries = 3, float $retryBaseDelay = 1.0, float $retryMaxDelay = 30.0)` - retries 429 (Retry-After as seconds or HTTP date), 5xx and connection failures with backoff; POST run start only on 429 or failed connection
 - DTOs (all `final readonly`, `fromArray(array)`):
   - `ConvertedImage`: index: int, source: string, sourceType: SourceType, status: ConversionStatus, outputUrl: ?string, outputKey: ?string, sourceFormat: ?string, outputFormat: ?string, sourceBytes: ?int, outputBytes: ?int, bytesSaved: ?int, savedPercent: ?float, sourceWidth: ?int, sourceHeight: ?int, outputWidth: ?int, outputHeight: ?int, error: ?string; helpers isSuccessful(), isFailed(), isLarger(), wasResized()
 - Enums:
