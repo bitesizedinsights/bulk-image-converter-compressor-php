@@ -65,6 +65,8 @@ Apify bills per successfully converted image:
 
 Converting 100 images on the free plan costs about $1.25, or about $8.11 for 1,000 images on a Gold plan. Current prices are on the [Actor page](https://apify.com/bite-sized-insights/bulk-image-converter-compressor-and-resizer). [Run the Image Converter on Apify](https://apify.com/bite-sized-insights/bulk-image-converter-compressor-and-resizer).
 
+Free-plan users get 5 runs in total; each free run converts the first 3 images (URLs plus upload keys). Console test runs have the same cap.
+
 ## Use Cases
 
 - **Web performance:** turn photo libraries into WebP or AVIF and cap the width to speed up page loads and improve Core Web Vitals.

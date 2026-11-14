@@ -31,6 +31,9 @@ Key facts:
   - `ImageConverter\Exception\RateLimitException` (extends ApiException): HTTP 429, property retryAfter (seconds)
 - Single bad images do not throw; they are returned with status Failed and an error message.
 
+## Limits
+- Free Apify plan: 5 runs in total, each converting the first 3 images (URLs plus upload keys); Console test runs have the same cap
+
 ## Example
 ```php
 use ImageConverter\Client;
