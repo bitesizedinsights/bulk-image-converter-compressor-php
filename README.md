@@ -149,7 +149,7 @@ use ImageConverter\Config;
 $client = (new Client(new Config(timeout: 300, requestTimeout: 60)))->setApifyKey($apiToken);
 ```
 
-`timeout` is the longest wait for a run in seconds (default 600), `requestTimeout` limits a single HTTP request (default 90). `actorId` and `baseUrl` can be overridden, for example to use a copy of the Actor. Pass a Guzzle client as the second constructor argument to customize HTTP behavior.
+`timeout` is the longest wait for a run in seconds (default 600), `requestTimeout` limits a single HTTP request (default 90). When `timeout` expires the client aborts the run on a best-effort basis (`POST /actor-runs/{id}/abort`, 10 seconds at most, no retries) so it does not keep running and billing; the thrown `ApiException` then says the run "was aborted" and carries the run ID in `$e->runId`. If the abort itself fails, the original timeout message is thrown unchanged. Failed runs, rate limits and connection errors never trigger an abort. `$client->abort($runId)` aborts a run explicitly. `actorId` and `baseUrl` can be overridden, for example to use a copy of the Actor. Pass a Guzzle client as the second constructor argument to customize HTTP behavior.
 
 ## Retries and Backoff
 
@@ -170,7 +170,7 @@ $client = (new Client(new Config(maxRetries: 5, retryBaseDelay: 2.0, retryMaxDel
 - `InvalidArgumentException`: no images, more than 1000, a URL over 2048 characters, an upload key over 256, a store name over 63, quality outside 1 to 100, sizes outside 0 to 16000 or an invalid color.
 - `MissingApiKeyException` (extends `ApiException`): no key via `setApifyKey()` and neither `APIFY_API_TOKEN` nor `APIFY_TOKEN` is set.
 - `RateLimitException` (extends `ApiException`): HTTP 429; `$e->retryAfter` holds the advised seconds.
-- `ApiException`: failed requests, malformed responses, a failed, aborted or timed-out run, a run that does not finish within `timeout`, or a dataset item that cannot be mapped (the message names its index).
+- `ApiException`: failed requests, malformed responses, a failed, aborted or timed-out run, a run that does not finish within `timeout` (it is aborted, `$e->runId` holds its ID), or a dataset item that cannot be mapped (the message names its index).
 - Single bad images never throw: they come back as `failed` rows.
 
 ## PHP Image Converter Examples

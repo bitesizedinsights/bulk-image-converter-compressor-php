@@ -18,6 +18,7 @@ Key facts:
 - `Client::__construct(?Config $config = null, ?GuzzleHttp\ClientInterface $http = null, ?Closure $sleeper = null)`
 - `Client::setApifyKey(string $apiKey): static` - sets the Apify API key; without it `APIFY_API_TOKEN` or `APIFY_TOKEN` is read from the environment, and `MissingApiKeyException` is thrown on the first API call if neither is set
 - `Client::convert(array $urls = [], OutputFormat $outputFormat = OutputFormat::WebP, int $quality = 80, ?int $maxWidth = null, ?int $maxHeight = null, ?bool $keepAspectRatio = null, ?bool $stripMetadata = null, ?string $backgroundColor = null, array $uploadKeys = [], ?string $uploadStoreName = null): ConvertedImage[]` - one run for all images (1-1000 in total from urls and uploadKeys), waits for it, returns one ConvertedImage per image; null options are not sent
+- `Client::abort(string $runId): void` - aborts an Actor run (POST /actor-runs/{id}/abort); throws ApiException on failure
 - `Config(string $actorId = 'bite-sized-insights/bulk-image-converter-compressor-and-resizer', string $baseUrl = 'https://api.apify.com/v2', int $timeout = 600, int $requestTimeout = 90, int $maxRetries = 3, float $retryBaseDelay = 1.0, float $retryMaxDelay = 30.0)` - retries 429 (Retry-After as seconds or HTTP date), 5xx and connection failures with backoff; POST run start only on 429 or failed connection
 - DTOs (all `final readonly`, `fromArray(array)`):
   - `ConvertedImage`: index: int, source: string, sourceType: SourceType, status: ConversionStatus, outputUrl: ?string, outputKey: ?string, sourceFormat: ?string, outputFormat: ?string, sourceBytes: ?int, outputBytes: ?int, bytesSaved: ?int, savedPercent: ?float, sourceWidth: ?int, sourceHeight: ?int, outputWidth: ?int, outputHeight: ?int, error: ?string; serialization: implements JsonSerializable and toArray() in the Actor's camelCase shape, fromArray(toArray()) restores it; helpers isSuccessful(), isFailed(), isLarger(), wasResized()
@@ -27,7 +28,7 @@ Key facts:
   - `SourceType`: Url, Upload
 - Exceptions:
   - `InvalidArgumentException`: no images, more than 1000, url >2048 chars, uploadKey >256 chars, uploadStoreName >63 chars, quality outside 1-100, maxWidth/maxHeight outside 0-16000, invalid backgroundColor
-  - `ImageConverter\Exception\ApiException`: failed request, malformed response, failed/aborted/timed-out run, run not finished within Config::$timeout, unmappable dataset item
+  - `ImageConverter\Exception\ApiException`: failed request, malformed response, failed/aborted/timed-out run, run not finished within Config::$timeout (the run is aborted best-effort, message ends 'and was aborted' if that worked, property runId holds the run ID), unmappable dataset item
   - `ImageConverter\Exception\RateLimitException` (extends ApiException): HTTP 429, property retryAfter (seconds)
 - Single bad images do not throw; they are returned with status Failed and an error message.
 

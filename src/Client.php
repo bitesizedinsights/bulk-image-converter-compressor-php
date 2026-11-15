@@ -16,6 +16,7 @@ use ImageConverter\Exception\MissingApiKeyException;
 use ImageConverter\Exception\RateLimitException;
 use InvalidArgumentException;
 use JsonException;
+use Throwable;
 
 final class Client
 {
@@ -220,7 +221,14 @@ final class Client
             $remaining = $deadline - time();
 
             if ($remaining <= 0) {
-                throw new ApiException("Actor run did not finish within {$this->config->timeout} seconds");
+                $runId = is_string($run['id'] ?? null) ? $run['id'] : null;
+                $message = "Actor run did not finish within {$this->config->timeout} seconds";
+
+                if ($runId !== null && $this->tryAbort($runId)) {
+                    $message .= ' and was aborted';
+                }
+
+                throw new ApiException($message, runId: $runId);
             }
 
             $runId = $run['id'] ?? null;
@@ -234,6 +242,32 @@ final class Client
             ]);
             $run = $this->runData($result);
         }
+    }
+
+    /**
+     * Aborts a run on a best-effort basis after the deadline expired: short timeout, no retries, errors swallowed.
+     */
+    private function tryAbort(string $runId): bool
+    {
+        try {
+            $this->request('POST', "/actor-runs/{$runId}/abort", [], min(10, $this->config->requestTimeout), 0);
+
+            return true;
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    /**
+     * Aborts an Actor run, for example one that is no longer needed. The run keeps its data, its status becomes ABORTED.
+     *
+     * @param  string  $runId  The run ID, as found in `ApiException::$runId`.
+     *
+     * @throws ApiException
+     */
+    public function abort(string $runId): void
+    {
+        $this->request('POST', '/actor-runs/'.rawurlencode($runId).'/abort');
     }
 
     /**
@@ -314,13 +348,19 @@ final class Client
      * @throws ApiException
      * @throws RateLimitException
      */
-    private function request(string $method, string $path, array $options = []): array
-    {
+    private function request(
+        string $method,
+        string $path,
+        array $options = [],
+        ?int $timeout = null,
+        ?int $maxRetries = null,
+    ): array {
+        $maxRetries ??= $this->config->maxRetries;
         $options['headers'] = [
             'Authorization' => 'Bearer '.$this->resolveApiKey(),
             'Accept' => 'application/json',
         ];
-        $options['timeout'] = $this->config->requestTimeout;
+        $options['timeout'] = $timeout ?? $this->config->requestTimeout;
 
         for ($attempt = 0; ; $attempt++) {
             try {
@@ -329,7 +369,7 @@ final class Client
             } catch (BadResponseException $e) {
                 $status = $e->getResponse()->getStatusCode();
                 $retryable = $status === 429 || ($status >= 500 && $method !== 'POST');
-                $delay = $retryable && $attempt < $this->config->maxRetries
+                $delay = $retryable && $attempt < $maxRetries
                     ? $this->retryDelay($attempt, $status === 429 ? $this->retryAfter($e) : null)
                     : null;
 
@@ -346,7 +386,7 @@ final class Client
                 // A failed connection never reached the server, so it is safe to repeat even for POST.
                 $retryable = $e instanceof ConnectException || $method !== 'POST';
 
-                if ($retryable && $attempt < $this->config->maxRetries) {
+                if ($retryable && $attempt < $maxRetries) {
                     ($this->sleeper)($this->retryDelay($attempt, null) ?? 0.0);
 
                     continue;

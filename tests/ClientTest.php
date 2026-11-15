@@ -159,6 +159,88 @@ test('throws when the run does not finish in time', function () {
         ->toThrow(ApiException::class, 'did not finish within 0 seconds');
 });
 
+test('deadline expiry aborts the run once and reports it', function () {
+    $history = [];
+    $client = makeClient(
+        [runResponse('RUNNING', 'run9'), runResponse('ABORTING', 'run9')],
+        $history,
+        new Config(timeout: 0, requestTimeout: 90),
+    );
+
+    try {
+        $client->convert(['https://example.com/a.png']);
+        $this->fail('Expected ApiException');
+    } catch (ApiException $e) {
+        expect($e->getMessage())->toBe('Actor run did not finish within 0 seconds and was aborted')
+            ->and($e->runId)->toBe('run9');
+    }
+
+    $aborts = array_values(array_filter(
+        $history,
+        static fn (array $h): bool => str_ends_with($h['request']->getUri()->getPath(), '/abort'),
+    ));
+
+    expect($aborts)->toHaveCount(1)
+        ->and($aborts[0]['request']->getMethod())->toBe('POST')
+        ->and($aborts[0]['request']->getUri()->getPath())->toBe('/v2/actor-runs/run9/abort')
+        ->and($aborts[0]['request']->getHeaderLine('Authorization'))->toBe('Bearer test-token')
+        ->and($aborts[0]['options']['timeout'])->toBe(10);
+});
+
+test('a failing abort still throws the original timeout error without the aborted wording', function () {
+    $history = [];
+    $client = makeClient(
+        [runResponse('RUNNING', 'run9'), new Response(500, [], 'boom')],
+        $history,
+        new Config(timeout: 0, maxRetries: 3),
+    );
+
+    try {
+        $client->convert(['https://example.com/a.png']);
+        $this->fail('Expected ApiException');
+    } catch (ApiException $e) {
+        expect($e->getMessage())->toBe('Actor run did not finish within 0 seconds')
+            ->and($e->runId)->toBe('run9');
+    }
+
+    expect($history)->toHaveCount(2);
+});
+
+test('no abort on success or on failed runs', function () {
+    $history = [];
+    $client = makeClient([
+        runResponse('SUCCEEDED'),
+        jsonResponse(200, [loadFixture('image_success')]),
+    ], $history);
+    $client->convert(['https://example.com/a.png']);
+
+    expect($history)->toHaveCount(2);
+
+    $history = [];
+    $client = makeClient([runResponse('FAILED')], $history);
+
+    expect(fn () => $client->convert(['https://example.com/a.png']))->toThrow(ApiException::class);
+    expect($history)->toHaveCount(1);
+});
+
+test('abort posts to the abort endpoint', function () {
+    $history = [];
+    $client = makeClient([runResponse('ABORTING', 'run7')], $history);
+
+    $client->abort('run7');
+
+    expect($history)->toHaveCount(1)
+        ->and($history[0]['request']->getMethod())->toBe('POST')
+        ->and($history[0]['request']->getUri()->getPath())->toBe('/v2/actor-runs/run7/abort')
+        ->and($history[0]['request']->getHeaderLine('Authorization'))->toBe('Bearer test-token');
+});
+
+test('abort throws ApiException on failure', function () {
+    $client = makeClient([new Response(404, [], 'nope')]);
+
+    expect(fn () => $client->abort('run7'))->toThrow(ApiException::class);
+});
+
 test('throws on failed run status', function (string $status) {
     $client = makeClient([runResponse($status)]);
 
