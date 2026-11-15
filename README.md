@@ -216,7 +216,7 @@ Animated GIF and WebP stay animated when converted to GIF or WebP. Transparency 
 
 ## Requirements
 
-PHP 8.3 or newer, Guzzle 7 and an Apify API token.
+PHP 8.3 or newer, Guzzle 7 or 8 and an Apify API token.
 
 ## Powered by Apify
 
