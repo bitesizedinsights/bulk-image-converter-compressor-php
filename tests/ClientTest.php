@@ -603,3 +603,54 @@ test('a negative run timeout is rejected', function () {
         ->and(fn () => makeClient([])->convert(['https://example.com/a.png'], runTimeout: -5))
         ->toThrow(InvalidArgumentException::class, 'runTimeout');
 });
+
+function failedRun(mixed $statusMessage, string $status = 'FAILED'): Response
+{
+    $data = ['id' => 'run7', 'status' => $status, 'defaultDatasetId' => 'ds1'];
+
+    if ($statusMessage !== null) {
+        $data['statusMessage'] = $statusMessage;
+    }
+
+    return jsonResponse(201, ['data' => $data]);
+}
+
+function convertFailure(Response $response): ApiException
+{
+    try {
+        makeClient([$response])->convert(['https://example.com/a.png']);
+    } catch (ApiException $e) {
+        return $e;
+    }
+
+    throw new RuntimeException('Expected ApiException');
+}
+
+test('failed run exposes the status message in message and property', function () {
+    $e = convertFailure(failedRun("Out of memory\n(exit 137)", 'ABORTED'));
+
+    expect($e->getMessage())->toBe('Actor run ended with status ABORTED: Out of memory (exit 137)')
+        ->and($e->statusMessage)->toBe('Out of memory (exit 137)')
+        ->and($e->runId)->toBe('run7');
+});
+
+test('failed run without status message keeps the plain message', function () {
+    $e = convertFailure(failedRun(null, 'TIMED-OUT'));
+
+    expect($e->getMessage())->toBe('Actor run ended with status TIMED-OUT')
+        ->and($e->statusMessage)->toBeNull();
+});
+
+test('empty and non-string status messages are ignored', function (mixed $value) {
+    $e = convertFailure(failedRun($value));
+
+    expect($e->getMessage())->toBe('Actor run ended with status FAILED')
+        ->and($e->statusMessage)->toBeNull();
+})->with([[''], ['  '], [42], [['x']], [true]]);
+
+test('long status messages are capped at 500 in the message and 2000 in the property', function () {
+    $e = convertFailure(failedRun(str_repeat('a', 3000)));
+
+    expect(mb_strlen($e->getMessage()))->toBe(mb_strlen('Actor run ended with status FAILED: ') + 500)
+        ->and($e->statusMessage)->toBe(str_repeat('a', 2000));
+});

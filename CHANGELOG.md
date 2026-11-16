@@ -6,10 +6,12 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
+- A failed, aborted or timed-out run now reports the Actor's own reason: the message is `Actor run ended with status X: <statusMessage>` when the run has a non-empty string `statusMessage` (control characters stripped, capped at 500 characters), unchanged otherwise.
 - Behavior change: the run start now sends Apify's run time limit (`timeout` query, seconds) and defaults it to `Config::$timeout`, so a run can no longer outlive the client's wait. Opt out with `Config::$runTimeout = 0` to keep the Actor's own limit.
 
 ### Added
 
+- `ApiException::$statusMessage` (?string, last constructor parameter, default null): the run's raw `statusMessage` (control characters stripped, capped at 2000 characters), set for failed, aborted and timed-out runs and for the deadline-expiry error, together with `$runId`.
 - `Config::$runTimeout` (?int, default null = `Config::$timeout`, 0 = Actor default) and a per-call `runTimeout` argument on `Client::convert()` (last, optional). Negative values throw `InvalidArgumentException`.
 - When `Config::$timeout` expires while waiting for a run, the client now aborts the run (best effort, short timeout, no retries, errors swallowed) so it does not keep billing. The `ApiException` then says the run "was aborted" and carries the run ID in the new `ApiException::$runId`.
 - `Client::abort(string $runId)` to abort a run explicitly.

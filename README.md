@@ -179,7 +179,7 @@ $client = (new Client(new Config(maxRetries: 5, retryBaseDelay: 2.0, retryMaxDel
 - `InvalidArgumentException`: no images, more than 1000, a URL over 2048 characters, an upload key over 256, a store name over 63, quality outside 1 to 100, sizes outside 0 to 16000 or an invalid color.
 - `MissingApiKeyException` (extends `ApiException`): no key via `setApifyKey()` and neither `APIFY_API_TOKEN` nor `APIFY_TOKEN` is set.
 - `RateLimitException` (extends `ApiException`): HTTP 429; `$e->retryAfter` holds the advised seconds.
-- `ApiException`: failed requests, malformed responses, a failed, aborted or timed-out run, a run that does not finish within `timeout` (it is aborted, `$e->runId` holds its ID), or a dataset item that cannot be mapped (the message names its index).
+- `ApiException`: failed requests, malformed responses, a failed, aborted or timed-out run, a run that does not finish within `timeout` (it is aborted, `$e->runId` holds its ID), or a dataset item that cannot be mapped (the message names its index). For a failed, aborted or timed-out run the message is `Actor run ended with status X: <reason>` when the run reports a status message (single line, at most 500 characters); `$e->statusMessage` holds the raw reason (at most 2000 characters, null when absent) and `$e->runId` the run ID, so you can look the run up or log it: `catch (ApiException $e) { error_log("{$e->runId}: {$e->statusMessage}"); }`.
 - Single bad images never throw: they come back as `failed` rows.
 
 ## PHP Image Converter Examples

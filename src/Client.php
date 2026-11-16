@@ -227,7 +227,18 @@ final class Client
             }
 
             if (is_string($status) && in_array($status, self::FAILED_STATUSES, true)) {
-                throw new ApiException("Actor run ended with status {$status}");
+                $statusMessage = $this->statusMessage($run);
+                $message = "Actor run ended with status {$status}";
+
+                if ($statusMessage !== null) {
+                    $message .= ': '.$this->shorten($statusMessage);
+                }
+
+                throw new ApiException(
+                    $message,
+                    runId: is_string($run['id'] ?? null) ? $run['id'] : null,
+                    statusMessage: $statusMessage,
+                );
             }
 
             if (! is_string($status) || ! in_array($status, self::RUNNING_STATUSES, true)) {
@@ -244,7 +255,7 @@ final class Client
                     $message .= ' and was aborted';
                 }
 
-                throw new ApiException($message, runId: $runId);
+                throw new ApiException($message, runId: $runId, statusMessage: $this->statusMessage($run));
             }
 
             $runId = $run['id'] ?? null;
@@ -258,6 +269,29 @@ final class Client
             ]);
             $run = $this->runData($result);
         }
+    }
+
+    /**
+     * The run's statusMessage when it is a non-empty string, control characters removed, capped at 2000 characters.
+     *
+     * @param  array<mixed>  $run
+     */
+    private function statusMessage(array $run): ?string
+    {
+        $message = $run['statusMessage'] ?? null;
+
+        if (! is_string($message)) {
+            return null;
+        }
+
+        $message = trim((string) preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $message));
+
+        return $message === '' ? null : mb_substr($message, 0, 2000);
+    }
+
+    private function shorten(string $text): string
+    {
+        return mb_strlen($text) > 500 ? mb_substr($text, 0, 497).'...' : $text;
     }
 
     /**
