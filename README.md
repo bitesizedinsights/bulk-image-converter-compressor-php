@@ -151,6 +151,15 @@ $client = (new Client(new Config(timeout: 300, requestTimeout: 60)))->setApifyKe
 
 `timeout` is the longest wait for a run in seconds (default 600), `requestTimeout` limits a single HTTP request (default 90). When `timeout` expires the client aborts the run on a best-effort basis (`POST /actor-runs/{id}/abort`, 10 seconds at most, no retries) so it does not keep running and billing; the thrown `ApiException` then says the run "was aborted" and carries the run ID in `$e->runId`. If the abort itself fails, the original timeout message is thrown unchanged. Failed runs, rate limits and connection errors never trigger an abort. `$client->abort($runId)` aborts a run explicitly. `actorId` and `baseUrl` can be overridden, for example to use a copy of the Actor. Pass a Guzzle client as the second constructor argument to customize HTTP behavior.
 
+### Run timeout
+
+Besides the client's own wait (`timeout`), the run start sends Apify's run time limit as the `timeout` query parameter (seconds) of `POST /acts/{id}/runs`, so the platform stops a run when the client has given up. Resolution order: the `runTimeout` argument of `convert()`, then `Config::$runTimeout`, then `Config::$timeout`. `0` sends nothing and keeps the Actor's own limit (600 s); a `timeout` of 0 or less sends nothing either. Negative values throw an `InvalidArgumentException`. The value is only sent when the run is started, never on polling, abort or dataset requests, and is separate from `requestTimeout`.
+
+```php
+$client = (new Client(new Config(timeout: 300, runTimeout: 900)))->setApifyKey($apiToken);
+$client->convert($urls, runTimeout: 120); // this call only
+```
+
 ## Retries and Backoff
 
 Failed requests are retried automatically, by default up to 3 times with exponential backoff (1 s, 2 s, 4 s, each with 50 to 100 percent jitter, at most 30 s):

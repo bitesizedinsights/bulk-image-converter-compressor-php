@@ -77,6 +77,8 @@ final class Client
      * @param  string|null  $backgroundColor  Hex color like `#ffffff` that fills transparency for JPEG and BMP.
      * @param  list<string>  $uploadKeys  Keys of files you uploaded to a key-value store.
      * @param  string|null  $uploadStoreName  Name of the store holding the uploaded files; null = default store.
+     * @param  int|null  $runTimeout  Apify run time limit in seconds for this call, 0 = the Actor's own limit; null =
+     *                                `Config::$runTimeout`, which itself defaults to `Config::$timeout`.
      * @return list<ConvertedImage>
      *
      * @throws InvalidArgumentException When an argument is outside the limits the Actor accepts.
@@ -94,7 +96,14 @@ final class Client
         ?string $backgroundColor = null,
         array $uploadKeys = [],
         ?string $uploadStoreName = null,
+        ?int $runTimeout = null,
     ): array {
+        if ($runTimeout !== null && $runTimeout < 0) {
+            throw new InvalidArgumentException(
+                'runTimeout must be a positive number of seconds, or 0 for the Actor default'
+            );
+        }
+
         $this->validate($urls, $uploadKeys, $quality, $maxWidth, $maxHeight, $backgroundColor, $uploadStoreName);
 
         $input = [
@@ -119,7 +128,7 @@ final class Client
             }
         }
 
-        $run = $this->startRun($input);
+        $run = $this->startRun($input, $runTimeout);
         $run = $this->awaitRun($run);
 
         return $this->fetchImages($this->datasetId($run));
@@ -187,10 +196,17 @@ final class Client
      * @param  array<string, mixed>  $input
      * @return array<mixed>
      */
-    private function startRun(array $input): array
+    private function startRun(array $input, ?int $runTimeout = null): array
     {
         $actor = str_replace('/', '~', $this->config->actorId);
-        $result = $this->request('POST', "/acts/{$actor}/runs", ['json' => $input]);
+        $options = ['json' => $input];
+        $limit = $runTimeout ?? $this->config->runTimeout ?? $this->config->timeout;
+
+        if ($limit > 0) {
+            $options['query'] = ['timeout' => $limit];
+        }
+
+        $result = $this->request('POST', "/acts/{$actor}/runs", $options);
 
         return $this->runData($result);
     }

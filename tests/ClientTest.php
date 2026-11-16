@@ -558,3 +558,48 @@ test('string length limits are inclusive and count characters', function () {
 
     expect($history)->toHaveCount(2);
 });
+
+test('the run timeout defaults to the client timeout and only the run start carries it', function () {
+    $history = [];
+    makeClient([runResponse(), jsonResponse(200, [])], $history, new Config(timeout: 120, maxRetries: 0))
+        ->convert(['https://example.com/a.png']);
+
+    expect($history[0]['request']->getUri()->getQuery())->toBe('timeout=120')
+        ->and($history[1]['request']->getUri()->getQuery())->not->toContain('timeout');
+});
+
+test('an explicit Config run timeout wins over the client timeout', function () {
+    $history = [];
+    makeClient([runResponse(), jsonResponse(200, [])], $history, new Config(timeout: 120, runTimeout: 900))
+        ->convert(['https://example.com/a.png']);
+
+    expect($history[0]['request']->getUri()->getQuery())->toBe('timeout=900');
+});
+
+test('the per-call run timeout wins over Config', function () {
+    $history = [];
+    makeClient([runResponse(), jsonResponse(200, [])], $history, new Config(runTimeout: 900))
+        ->convert(['https://example.com/a.png'], runTimeout: 30);
+
+    expect($history[0]['request']->getUri()->getQuery())->toBe('timeout=30');
+});
+
+test('a run timeout of 0 sends no timeout query', function () {
+    $history = [];
+    makeClient([runResponse(), jsonResponse(200, [])], $history, new Config(runTimeout: 0))
+        ->convert(['https://example.com/a.png']);
+
+    expect($history[0]['request']->getUri()->getQuery())->toBe('');
+
+    $history = [];
+    makeClient([runResponse(), jsonResponse(200, [])], $history)
+        ->convert(['https://example.com/a.png'], runTimeout: 0);
+
+    expect($history[0]['request']->getUri()->getQuery())->toBe('');
+});
+
+test('a negative run timeout is rejected', function () {
+    expect(fn () => new Config(runTimeout: -1))->toThrow(InvalidArgumentException::class, 'runTimeout')
+        ->and(fn () => makeClient([])->convert(['https://example.com/a.png'], runTimeout: -5))
+        ->toThrow(InvalidArgumentException::class, 'runTimeout');
+});

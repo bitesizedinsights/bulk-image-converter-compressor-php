@@ -4,8 +4,13 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- Behavior change: the run start now sends Apify's run time limit (`timeout` query, seconds) and defaults it to `Config::$timeout`, so a run can no longer outlive the client's wait. Opt out with `Config::$runTimeout = 0` to keep the Actor's own limit.
+
 ### Added
 
+- `Config::$runTimeout` (?int, default null = `Config::$timeout`, 0 = Actor default) and a per-call `runTimeout` argument on `Client::convert()` (last, optional). Negative values throw `InvalidArgumentException`.
 - When `Config::$timeout` expires while waiting for a run, the client now aborts the run (best effort, short timeout, no retries, errors swallowed) so it does not keep billing. The `ApiException` then says the run "was aborted" and carries the run ID in the new `ApiException::$runId`.
 - `Client::abort(string $runId)` to abort a run explicitly.
 
