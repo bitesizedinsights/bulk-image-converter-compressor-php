@@ -11,6 +11,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- `SpendingLimitException` (final, extends `ApiException`): thrown for HTTP 402 (Apify monthly usage or spending limit reached) on run start, polling, dataset and abort. Code 402, `$errorType` holds Apify's error `type` (null when the body is unreadable), message parts are control-character-free and capped at 500 characters. 402 is never retried.
 - `ApiException::$statusMessage` (?string, last constructor parameter, default null): the run's raw `statusMessage` (control characters stripped, capped at 2000 characters), set for failed, aborted and timed-out runs and for the deadline-expiry error, together with `$runId`.
 - `Config::$runTimeout` (?int, default null = `Config::$timeout`, 0 = Actor default) and a per-call `runTimeout` argument on `Client::convert()` (last, optional). Negative values throw `InvalidArgumentException`.
 - When `Config::$timeout` expires while waiting for a run, the client now aborts the run (best effort, short timeout, no retries, errors swallowed) so it does not keep billing. The `ApiException` then says the run "was aborted" and carries the run ID in the new `ApiException::$runId`.

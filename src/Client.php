@@ -14,6 +14,7 @@ use ImageConverter\DTO\ConvertedImage;
 use ImageConverter\Exception\ApiException;
 use ImageConverter\Exception\MissingApiKeyException;
 use ImageConverter\Exception\RateLimitException;
+use ImageConverter\Exception\SpendingLimitException;
 use InvalidArgumentException;
 use JsonException;
 use Throwable;
@@ -497,10 +498,60 @@ final class Client
             throw new RateLimitException('Rate limit exceeded', $this->retryAfter($e) ?? 60);
         }
 
+        if ($response->getStatusCode() === 402) {
+            [$type, $detail] = $this->errorDetails($e);
+            $message = 'Apify usage or spending limit reached (HTTP 402)';
+
+            throw new SpendingLimitException(
+                $detail === null ? $message : "{$message}: {$detail}",
+                $e,
+                errorType: $type,
+            );
+        }
+
         throw new ApiException(
             "API request failed with status {$response->getStatusCode()}: ".$e->getMessage(),
             $response->getStatusCode(),
             $e,
         );
+    }
+
+    /**
+     * Apify's error `type` and message from a `{"error": {"type": ..., "message": ...}}` body, each cleaned of control
+     * characters and capped at 500 characters; null when missing or unparseable.
+     *
+     * @return array{0: ?string, 1: ?string}
+     */
+    private function errorDetails(BadResponseException $e): array
+    {
+        $body = $e->getResponse()->getBody();
+
+        try {
+            if ($body->isSeekable()) {
+                $body->rewind();
+            }
+
+            $decoded = json_decode((string) $body, true, 512, JSON_THROW_ON_ERROR);
+        } catch (Throwable) {
+            return [null, null];
+        }
+
+        $error = is_array($decoded) ? ($decoded['error'] ?? null) : null;
+
+        if (! is_array($error)) {
+            return [null, null];
+        }
+
+        $clean = function (mixed $value): ?string {
+            if (! is_string($value)) {
+                return null;
+            }
+
+            $value = trim((string) preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $value));
+
+            return $value === '' ? null : $this->shorten($value);
+        };
+
+        return [$clean($error['type'] ?? null), $clean($error['message'] ?? null)];
     }
 }

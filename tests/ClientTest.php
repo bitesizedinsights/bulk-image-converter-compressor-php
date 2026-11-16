@@ -10,6 +10,7 @@ use ImageConverter\Config;
 use ImageConverter\Exception\ApiException;
 use ImageConverter\Exception\MissingApiKeyException;
 use ImageConverter\Exception\RateLimitException;
+use ImageConverter\Exception\SpendingLimitException;
 use ImageConverter\OutputFormat;
 use Psr\Http\Message\RequestInterface;
 
@@ -653,4 +654,76 @@ test('long status messages are capped at 500 in the message and 2000 in the prop
 
     expect(mb_strlen($e->getMessage()))->toBe(mb_strlen('Actor run ended with status FAILED: ') + 500)
         ->and($e->statusMessage)->toBe(str_repeat('a', 2000));
+});
+
+function limitBody(): array
+{
+    return ['error' => [
+        'type' => 'platform-feature-disabled',
+        'message' => "Monthly usage hard limit exceeded\n(token abc)",
+    ]];
+}
+
+test('402 on run start maps to SpendingLimitException with the error type and is not retried', function () {
+    $history = [];
+    $client = makeClient([jsonResponse(402, limitBody())], $history);
+
+    try {
+        $client->convert(['https://example.com/a.png']);
+        $this->fail('Expected SpendingLimitException');
+    } catch (SpendingLimitException $e) {
+        expect($e)->toBeInstanceOf(ApiException::class)
+            ->and($e->getCode())->toBe(402)
+            ->and($e->errorType)->toBe('platform-feature-disabled')
+            ->and($e->getMessage())->toContain('Monthly usage hard limit exceeded')
+            ->and($e->getMessage())->not->toMatch('/[\x00-\x1F]/')
+            ->and($history)->toHaveCount(1);
+    }
+});
+
+test('402 while polling maps to SpendingLimitException', function () {
+    $history = [];
+    $client = makeClient([runResponse('RUNNING'), jsonResponse(402, limitBody())], $history);
+
+    try {
+        $client->convert(['https://example.com/a.png']);
+        $this->fail('Expected SpendingLimitException');
+    } catch (SpendingLimitException $e) {
+        expect($e->getCode())->toBe(402)
+            ->and($e->errorType)->toBe('platform-feature-disabled')
+            ->and($history)->toHaveCount(2);
+    }
+});
+
+test('402 on the dataset request maps to SpendingLimitException', function () {
+    $history = [];
+    $client = makeClient([runResponse(), jsonResponse(402, limitBody())], $history);
+
+    try {
+        $client->convert(['https://example.com/a.png']);
+        $this->fail('Expected SpendingLimitException');
+    } catch (SpendingLimitException $e) {
+        expect($e->getCode())->toBe(402)
+            ->and($e->errorType)->toBe('platform-feature-disabled')
+            ->and($history)->toHaveCount(2);
+    }
+});
+
+test('402 on abort maps to SpendingLimitException', function () {
+    $client = makeClient([jsonResponse(402, limitBody())]);
+
+    expect(fn () => $client->abort('run1'))->toThrow(SpendingLimitException::class);
+});
+
+test('402 with an unparseable body has a null error type and a generic message', function () {
+    $client = makeClient([new Response(402, [], '<html>nope</html>')]);
+
+    try {
+        $client->convert(['https://example.com/a.png']);
+        $this->fail('Expected SpendingLimitException');
+    } catch (SpendingLimitException $e) {
+        expect($e->errorType)->toBeNull()
+            ->and($e->getCode())->toBe(402)
+            ->and($e->getMessage())->toBe('Apify usage or spending limit reached (HTTP 402)');
+    }
 });

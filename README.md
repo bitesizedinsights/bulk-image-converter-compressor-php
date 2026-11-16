@@ -167,6 +167,7 @@ Failed requests are retried automatically, by default up to 3 times with exponen
 - **Rate limits (429):** retried after at least the `Retry-After` time, given as seconds or as an HTTP date. Without the header plain backoff is used. If the server asks for more than `retryMaxDelay`, a `RateLimitException` is thrown right away.
 - **Server errors (5xx) and connection failures:** retried for reading results and polling.
 - **Starting a run:** only retried after a 429 or a failed connection. After a 5xx or a timeout the run may already exist, and a repeat would be billed twice, so the error is thrown instead.
+- **Usage or spending limit (402):** never retried, a `SpendingLimitException` is thrown right away.
 - **Other errors (4xx):** never retried.
 
 ```php
@@ -179,6 +180,7 @@ $client = (new Client(new Config(maxRetries: 5, retryBaseDelay: 2.0, retryMaxDel
 - `InvalidArgumentException`: no images, more than 1000, a URL over 2048 characters, an upload key over 256, a store name over 63, quality outside 1 to 100, sizes outside 0 to 16000 or an invalid color.
 - `MissingApiKeyException` (extends `ApiException`): no key via `setApifyKey()` and neither `APIFY_API_TOKEN` nor `APIFY_TOKEN` is set.
 - `RateLimitException` (extends `ApiException`): HTTP 429; `$e->retryAfter` holds the advised seconds.
+- `SpendingLimitException` (extends `ApiException`): HTTP 402, the Apify account reached its monthly usage or spending limit; the code is 402 and `$e->errorType` holds Apify's error `type` (null when the body is unreadable). Never retried. Catch it before `ApiException`: `try { $client->convert($urls); } catch (SpendingLimitException $e) { /* raise the limit or wait */ } catch (ApiException $e) { /* other failures */ }`.
 - `ApiException`: failed requests, malformed responses, a failed, aborted or timed-out run, a run that does not finish within `timeout` (it is aborted, `$e->runId` holds its ID), or a dataset item that cannot be mapped (the message names its index). For a failed, aborted or timed-out run the message is `Actor run ended with status X: <reason>` when the run reports a status message (single line, at most 500 characters); `$e->statusMessage` holds the raw reason (at most 2000 characters, null when absent) and `$e->runId` the run ID, so you can look the run up or log it: `catch (ApiException $e) { error_log("{$e->runId}: {$e->statusMessage}"); }`.
 - Single bad images never throw: they come back as `failed` rows.
 
