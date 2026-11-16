@@ -64,7 +64,12 @@ final class Client
     }
 
     /**
-     * Convert, compress and resize images and return one result per image.
+     * Convert, compress and resize images and return one result per processed image.
+     *
+     * Fewer rows than inputs come back on the free plan (first 3 images), with duplicate inputs (processed once),
+     * at the spending limit or after a shutdown. `ConvertedImage::$index` is 1-based and refers to the Actor's
+     * deduplicated list (URLs first, then upload keys). Use `Results::missingIndexes()`, `Results::unprocessed()` and
+     * `Results::isComplete()` to find images without a row. A row with a `time_limit` error counts as processed.
      *
      * Failed images come back as rows with status `failed`; they do not throw.
      *

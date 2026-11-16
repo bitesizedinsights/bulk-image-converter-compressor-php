@@ -76,7 +76,7 @@ Free-plan users get 5 runs in total; each free run converts the first 3 images (
 
 ## How to Convert Images in PHP
 
-`Client::convert()` starts one Actor run for all images, waits for it and returns one `ConvertedImage` per input image, URLs first, then uploaded files.
+`Client::convert()` starts one Actor run for all images, waits for it and returns one `ConvertedImage` per processed image, URLs first, then uploaded files. Fewer rows than inputs are returned on the free plan (first 3 images), with duplicate inputs, at the spending limit or after a shutdown; use `Results::missingIndexes()` and `Results::unprocessed()` to find the images without a row, see [Images without a result](#images-without-a-result).
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -98,7 +98,7 @@ At least one URL or upload key is required, up to 1000 images per run. URLs may 
 
 | Field | Type | Description |
 |---|---|---|
-| `index` | `int` | Position of the image in the input |
+| `index` | `int` | 1-based position of the image in the Actor's deduplicated input list (URLs first, then upload keys) |
 | `source` | `string` | The image URL or the upload key |
 | `sourceType` | `SourceType` | `Url` or `Upload` |
 | `status` | `ConversionStatus` | `Success` or `Failed` |
@@ -113,6 +113,25 @@ At least one URL or upload key is required, up to 1000 images per run. URLs may 
 Helpers: `isSuccessful()`, `isFailed()`, `isLarger()` (new file is bigger than the original) and `wasResized()`. Fields that do not apply are `null`, e.g. on failed rows.
 
 </details>
+
+### Images without a result
+
+`convert()` returns one row per processed image. Fewer rows come back on the free plan (first 3 images), with duplicates, at the spending limit or after a shutdown. A row with a `time_limit` error (image skipped for lack of time) counts as processed, it is a failed row, not a missing one. Duplicate URLs and upload keys are processed once, so `index` is the 1-based position in the deduplicated list (URLs first, then upload keys; control characters and surrounding whitespace stripped, a scheme-less URL gets `https://`), not in your original array. `Results` applies the same normalization:
+
+```php
+use ImageConverter\Results;
+
+$images = $client->convert($urls);
+
+Results::isComplete($images, Results::inputCount($urls)); // false when rows are missing
+Results::missingIndexes($images, Results::inputCount($urls)); // e.g. [4, 5]
+
+// Convert the images that got no row in a second call (array keys of your input are preserved)
+$rest = Results::unprocessed($images, $urls, $uploadKeys);
+$more = $client->convert($rest['urls'], uploadKeys: $rest['uploadKeys']);
+```
+
+Pass a deduplicated count to `missingIndexes()` and `isComplete()`; `Results::inputCount()` computes it. Duplicates of a processed image count as processed in `unprocessed()`.
 
 ### Store and Restore Results
 
