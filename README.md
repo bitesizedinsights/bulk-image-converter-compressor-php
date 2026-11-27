@@ -154,6 +154,36 @@ $images = $client->convert(
 );
 ```
 
+## Start Now, Collect Later: Run IDs
+
+`convert()` blocks until the images are ready. For large batches, queue jobs or web requests, split it into steps: `start()` returns as soon as the run is created and the work continues on Apify, so you can store the run ID and collect the images later, even from another process.
+
+```php
+$run = $client->start($urls, quality: 70); // returns at once
+$runId = $run->id;                          // store it
+
+// later, with a new client
+$run = $client->wait($runId);               // polls until the run succeeded (or throws)
+$images = $client->results($run);           // the same list<ConvertedImage> as convert()
+```
+
+| Method | Description |
+|---|---|
+| `start(...)` | Same arguments as `convert()`, one run for up to 1000 images. Starts the run and returns a `Run` without waiting. |
+| `getRun(string $runId)` | Looks the run up once, without waiting. Any status is returned: check `$run->status` (`RunStatus`) and `$run->isFinished()`. |
+| `wait(Run\|string $run, ?int $timeout = null)` | Polls until the run succeeded. Throws `ApiException` when it ends as `FAILED`, `ABORTED` or `TIMED-OUT` or does not finish within `$timeout` seconds (default `Config::$timeout`, 0 = check once). **It never aborts the run**, so you can wait again. |
+| `results(Run\|string $run)` | Reads the images of a succeeded run without waiting. Throws `ApiException` for any other status; rows of a failed, aborted or timed-out run are not read. |
+| `abort(Run\|string $run)` | Asks Apify to stop the run and returns it in its new state. |
+
+`Run` has `id`, `status`, `defaultDatasetId`, `startedAt`, `finishedAt`, `statusMessage` and `actId`, implements `JsonSerializable` and has `toArray()`/`fromArray()`. `RunStatus` has `Ready`, `Running`, `Succeeded`, `Failed`, `Aborting`, `Aborted`, `TimingOut` and `TimedOut`.
+
+- **Never start twice by accident:** every run is billed. `start()` repeats its request only when it provably had no effect (see [Retries and Backoff](#retries-and-backoff)). After a server error, a timeout or an unreadable response a run may exist: check the Apify Console before you call `start()` again. When the response names the run but cannot be fully read, `$e->runId` holds its ID.
+- **Run time limit:** the run started by `start()` gets the same Apify time limit as in `convert()`, by default `Config::$timeout` (600 s), however long you wait before collecting. For long runs set `runTimeout`, see [Run timeout](#run-timeout).
+- **Run IDs:** an ID must be 1 to 64 letters and digits, anything else throws `InvalidArgumentException` before any request. An unknown ID gives an `ApiException` with code 404.
+- **Other Actors:** `getRun()`, `wait()` and `results()` throw an `ApiException` for a run that does not belong to `Config::$actorId`. For this the client may read the Actor once (`GET /acts/{actorId}`). `abort()` does not check this: it stops whatever run of your account you name.
+- **`Run` objects:** `wait()` and `results()` take a `Run` at its word (a succeeded one is not looked up again). `results()` with a `Run` that still says `RUNNING` throws even if the run has finished since: pass the `Run` returned by `wait()`, or the ID. Only pass `Run` objects you got from this library or restored from your own storage; for untrusted data pass the ID.
+- **Results:** `index` and the `Results` helpers work as with `convert()`. The converted files and rows stay on Apify only as long as your account's data retention allows, so collect them in time.
+
 ## Image Format, Status and Source Type Enums
 
 - `OutputFormat`: `WebP`, `Jpeg`, `Png`, `Avif`, `Original`, `Gif`, `Tiff`, `Bmp`
@@ -168,11 +198,11 @@ use ImageConverter\Config;
 $client = (new Client(new Config(timeout: 300, requestTimeout: 60)))->setApifyKey($apiToken);
 ```
 
-`timeout` is the longest wait for a run in seconds (default 600), `requestTimeout` limits a single HTTP request (default 90). When `timeout` expires the client aborts the run on a best-effort basis (`POST /actor-runs/{id}/abort`, 10 seconds at most, no retries) so it does not keep running and billing; the thrown `ApiException` then says the run "was aborted" and carries the run ID in `$e->runId`. If the abort itself fails, the original timeout message is thrown unchanged. Failed runs never trigger an abort, and rate limits and connection errors only when they use up `timeout` while polling (see Retries and Backoff). `$client->abort($runId)` aborts a run explicitly. `actorId` and `baseUrl` can be overridden, for example to use a copy of the Actor. Pass a Guzzle client as the second constructor argument to customize HTTP behavior.
+`timeout` is the longest wait for a run in seconds (default 600), `requestTimeout` limits a single HTTP request (default 90). When `timeout` expires the client aborts the run on a best-effort basis (`POST /actor-runs/{id}/abort`, 10 seconds at most, no retries) so it does not keep running and billing (this applies to `convert()`, not to [`wait()`](#start-now-collect-later-run-ids)); the thrown `ApiException` then says the run "was aborted" and carries the run ID in `$e->runId`. If the abort itself fails, the original timeout message is thrown unchanged. Failed runs never trigger an abort, and rate limits and connection errors only when they use up `timeout` while polling (see Retries and Backoff). `$client->abort($runId)` aborts a run explicitly and returns its new state. `actorId` and `baseUrl` can be overridden, for example to use a copy of the Actor. Pass a Guzzle client as the second constructor argument to customize HTTP behavior.
 
 ### Run timeout
 
-Besides the client's own wait (`timeout`), the run start sends Apify's run time limit as the `timeout` query parameter (seconds) of `POST /acts/{id}/runs`, so the platform stops a run when the client has given up. Resolution order: the `runTimeout` argument of `convert()`, then `Config::$runTimeout`, then `Config::$timeout`. `0` sends nothing and keeps the Actor's own limit (600 s); a `timeout` of 0 or less sends nothing either. Negative values throw an `InvalidArgumentException`. The value is only sent when the run is started, never on polling, abort or dataset requests, and is separate from `requestTimeout`.
+Besides the client's own wait (`timeout`), the run start sends Apify's run time limit as the `timeout` query parameter (seconds) of `POST /acts/{id}/runs`, so the platform stops a run when the client has given up. Resolution order: the `runTimeout` argument of `convert()` or `start()`, then `Config::$runTimeout`, then `Config::$timeout`. `0` sends nothing and keeps the Actor's own limit (600 s); a `timeout` of 0 or less sends nothing either. Negative values throw an `InvalidArgumentException`. The value is only sent when the run is started, never on polling, abort or dataset requests, and is separate from `requestTimeout`.
 
 ```php
 $client = (new Client(new Config(timeout: 300, runTimeout: 900)))->setApifyKey($apiToken);
@@ -185,11 +215,11 @@ Failed requests are retried automatically, by default up to 3 times with exponen
 
 - **Rate limits (429):** retried after at least the `Retry-After` time, given as seconds or as an HTTP date. Without the header plain backoff is used. If the server asks for more than `retryMaxDelay`, a `RateLimitException` is thrown right away.
 - **Server errors (5xx) and connection failures:** retried for reading results and polling. A `Retry-After` on a 503 is honoured the same way (a longer one than `retryMaxDelay` throws an `ApiException` right away).
-- **Starting a run:** only retried after a 429, or after a connection failure that shows the request was never sent (DNS, connect or TLS error, and on Guzzle 8 a connect timeout). After a 5xx or any other timeout the run may already exist, and a repeat would be billed twice, so the error is thrown instead. Guzzle 7 reports a connect timeout like a read timeout (cURL error 28), so there neither is repeated.
+- **Starting a run (`convert()`, `start()`) and `abort()`:** only retried after a 429, or after a connection failure that shows the request was never sent (DNS, connect or TLS error, and on Guzzle 8 a connect timeout). After a 5xx or any other timeout the run may already exist, and a repeat would be billed twice, so the error is thrown instead. Guzzle 7 reports a connect timeout like a read timeout (cURL error 28), so there neither is repeated.
 - **Usage or spending limit (402):** never retried, a `SpendingLimitException` is thrown right away.
 - **Other errors (4xx, including 408):** never retried.
 
-**Overall time limit:** `Config::$timeout` also bounds the retries. It covers the run start, the wait for the run and all retries: no retry is started whose wait would pass it, and the timeout of each request is cut to the time left plus 5 seconds. Reading the results of a successful run always gets at least 30 seconds, so a call can take somewhat longer than `timeout`. If polling fails because this time is used up (a skipped retry, or a request that outlived it), the client aborts the run (best effort) and the error of that last request is thrown.
+**Overall time limit:** `Config::$timeout` also bounds the retries. It covers the run start, the wait for the run and all retries: no retry is started whose wait would pass it, and the timeout of each request is cut to the time left plus 5 seconds. Reading the results of a successful run always gets at least 30 seconds, so a call can take somewhat longer than `timeout`. If polling fails because this time is used up (a skipped retry, or a request that outlived it), the client aborts the run (best effort) and the error of that last request is thrown. This describes `convert()`. `start()`, `getRun()`, `wait()` and `results()` called on their own each get the limit (`wait()` uses its `$timeout` argument if given, `results()` gets at least 30 seconds), `abort()` has no overall limit, and none of them ever aborts a run on its own.
 
 ```php
 $client = (new Client(new Config(maxRetries: 5, retryBaseDelay: 2.0, retryMaxDelay: 60.0)))->setApifyKey($apiToken);
@@ -198,7 +228,7 @@ $client = (new Client(new Config(maxRetries: 5, retryBaseDelay: 2.0, retryMaxDel
 
 ## Error Handling for PHP Image Conversion
 
-- `InvalidArgumentException`: no images, more than 1000, a URL over 2048 characters, an upload key over 256, a store name over 63, quality outside 1 to 100, sizes outside 0 to 16000 or an invalid color.
+- `InvalidArgumentException`: a malformed run ID, a negative `wait()` timeout, no images, more than 1000, a URL over 2048 characters, an upload key over 256, a store name over 63, quality outside 1 to 100, sizes outside 0 to 16000 or an invalid color.
 - `MissingApiKeyException` (extends `ApiException`): no key via `setApifyKey()` and neither `APIFY_API_TOKEN` nor `APIFY_TOKEN` is set.
 - `RateLimitException` (extends `ApiException`): HTTP 429; `$e->retryAfter` holds the advised seconds.
 - `SpendingLimitException` (extends `ApiException`): HTTP 402, the Apify account reached its monthly usage or spending limit; the code is 402 and `$e->errorType` holds Apify's error `type` (null when the body is unreadable). Never retried. Catch it before `ApiException`: `try { $client->convert($urls); } catch (SpendingLimitException $e) { /* raise the limit or wait */ } catch (ApiException $e) { /* other failures */ }`.
@@ -213,6 +243,7 @@ $client = (new Client(new Config(maxRetries: 5, retryBaseDelay: 2.0, retryMaxDel
 - [`examples/04-formats-and-transparency.php`](examples/04-formats-and-transparency.php): JPEG background color and AVIF
 - [`examples/05-uploaded-files.php`](examples/05-uploaded-files.php): convert uploaded HEIC photos
 - [`examples/06-error-handling.php`](examples/06-error-handling.php): rate limits and failed images
+- [`examples/07-run-handles.php`](examples/07-run-handles.php): start a run now, collect the images later
 
 Contributing and running the tests: see [CONTRIBUTING.md](CONTRIBUTING.md).
 

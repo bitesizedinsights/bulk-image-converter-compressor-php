@@ -23,6 +23,8 @@ All notable changes to this project are documented in this file. The format is b
 - `Config::$runTimeout` (?int, default null = `Config::$timeout`, 0 = Actor default) and a per-call `runTimeout` argument on `Client::convert()` (last, optional). Negative values throw `InvalidArgumentException`.
 - When `Config::$timeout` expires while waiting for a run, the client now aborts the run (best effort, short timeout, no retries, errors swallowed) so it does not keep billing. The `ApiException` then says the run "was aborted" and carries the run ID in the new `ApiException::$runId`.
 - `Client::abort(string $runId)` to abort a run explicitly.
+- Run IDs for starting now and collecting later: `Client::start()` (arguments of `convert()`, returns a `Run` without waiting), `getRun()`, `wait()` and `results()`, plus the `Run` DTO and `RunStatus` enum. `wait()` never aborts the run and keeps polling while it is `ABORTING` or `TIMING-OUT`. `getRun()`, `wait()` and `results()` reject runs of other Actors. `convert()` behaves as before.
+- `Client::abort()` also accepts a `Run`, returns the run in its new state instead of nothing (so a response without readable run data now throws an `ApiException`) and rejects a malformed run ID with `InvalidArgumentException` before any request.
 
 ## [0.2.0] - 2026-11-15
 
