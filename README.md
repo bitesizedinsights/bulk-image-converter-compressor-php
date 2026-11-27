@@ -226,6 +226,14 @@ $client = (new Client(new Config(maxRetries: 5, retryBaseDelay: 2.0, retryMaxDel
 // new Config(maxRetries: 0) turns retrying off
 ```
 
+**Long `Retry-After`:** a wait above `retryMaxDelay` is neither waited out nor shortened to it. Retrying earlier than the server asks would most likely be rejected again and use up the retries, so the error is thrown at once: wait as long as you need before calling again, or raise `retryMaxDelay`.
+
+**Logging retries:** pass a callback as the fourth `Client` argument. It gets a `RetryEvent` (`ImageConverter\DTO\RetryEvent`) before the wait of each retry, with `method`, `path`, `retry` (from 1), `maxRetries`, `delay` (seconds), `status` (HTTP status or null), `curlError` (cURL error number or null) and `message()`. It is safe to log: it holds no token, query or body, and IDs in the path are masked. Anything the callback throws is ignored.
+
+```php
+$client = new Client(onRetry: static fn (\ImageConverter\DTO\RetryEvent $event) => error_log($event->message()));
+```
+
 ## Error Handling for PHP Image Conversion
 
 - `InvalidArgumentException`: a malformed run ID, a negative `wait()` timeout, no images, more than 1000, a URL over 2048 characters, an upload key over 256, a store name over 63, quality outside 1 to 100, sizes outside 0 to 16000 or an invalid color.

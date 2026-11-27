@@ -8,15 +8,15 @@ use Closure;
 use GuzzleHttp\Client as HttpClient;
 use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Exception\BadResponseException;
-use GuzzleHttp\Exception\ConnectException;
-use GuzzleHttp\Exception\ConnectTimeoutException;
 use GuzzleHttp\Exception\GuzzleException;
 use ImageConverter\DTO\ConvertedImage;
+use ImageConverter\DTO\RetryEvent;
 use ImageConverter\DTO\Run;
 use ImageConverter\Exception\ApiException;
 use ImageConverter\Exception\MissingApiKeyException;
 use ImageConverter\Exception\RateLimitException;
 use ImageConverter\Exception\SpendingLimitException;
+use ImageConverter\Support\Retrier;
 use InvalidArgumentException;
 use JsonException;
 use Throwable;
@@ -37,14 +37,8 @@ final class Client
     /** Apify IDs are plain alphanumeric strings; nothing else may become part of a URL path. */
     private const RUN_ID_PATTERN = '/\A[A-Za-z0-9]{1,64}\z/';
 
-    /** Seconds a request may run past the deadline, so a long poll of the remaining time can still answer. */
-    private const DEADLINE_GRACE_SECONDS = 5;
-
     /** Minimum seconds for reading the results of a successful run, even when the deadline is nearly used up. */
     private const RESULTS_WINDOW_SECONDS = 30;
-
-    /** cURL errors raised before the request is sent: resolve proxy (5) or host (6), connect (7), TLS (35). */
-    private const UNSENT_CURL_ERRORS = [5, 6, 7, 35];
 
     /** Longest wait Apify allows per request. */
     private const MAX_WAIT_SECONDS = 60;
@@ -58,19 +52,25 @@ final class Client
     /** Apify's internal ID of the configured Actor, once a run start or a lookup has told it. */
     private ?string $actorApiId = null;
 
-    /** @var Closure(float): void */
-    private readonly Closure $sleeper;
+    private readonly Retrier $retrier;
 
     /**
      * @param  (Closure(float): void)|null  $sleeper  Waits the given seconds between retries; replaced in tests.
+     * @param  (Closure(RetryEvent): void)|null  $onRetry  Called before the wait of each retry, for logging.
+     *                                                     What it throws is ignored.
      */
-    public function __construct(?Config $config = null, ?ClientInterface $http = null, ?Closure $sleeper = null)
-    {
+    public function __construct(
+        ?Config $config = null,
+        ?ClientInterface $http = null,
+        ?Closure $sleeper = null,
+        ?Closure $onRetry = null,
+    ) {
         $this->config = $config ?? new Config;
         $this->http = $http ?? new HttpClient;
-        $this->sleeper = $sleeper ?? static function (float $seconds): void {
+        $sleeper ??= static function (float $seconds): void {
             usleep((int) round($seconds * 1_000_000));
         };
+        $this->retrier = new Retrier($this->config, $sleeper, $onRetry);
     }
 
     /**
@@ -730,11 +730,8 @@ final class Client
     }
 
     /**
-     * Sends a request and retries 429, 5xx and connection failures with exponential backoff. Starting a run (POST) is
-     * only repeated after a 429 or a failed connection, because after a 5xx or a timeout the run may already exist and
-     * a repeat would bill it twice.
-     *
-     * With a deadline, no retry is started whose wait would pass it and each request's timeout is cut to the time left.
+     * Sends a request, retrying what `Support\Retrier` allows. With a deadline, `$retrySkipped` is set when
+     * only the deadline prevented a retry.
      *
      * @param  array<string, mixed>  $options
      * @return array<mixed>
@@ -751,7 +748,6 @@ final class Client
         ?float $deadline = null,
         bool &$retrySkipped = false,
     ): array {
-        $maxRetries ??= $this->config->maxRetries;
         $options['headers'] = [
             'Authorization' => 'Bearer '.$this->resolveApiKey(),
             'Accept' => 'application/json',
@@ -759,46 +755,22 @@ final class Client
         $baseTimeout = $timeout ?? $this->config->requestTimeout;
 
         for ($attempt = 0; ; $attempt++) {
-            $options['timeout'] = $this->cappedTimeout($baseTimeout, $deadline);
+            $options['timeout'] = $this->retrier->requestTimeout($baseTimeout, $deadline);
 
             try {
                 $response = $this->http->request($method, rtrim($this->config->baseUrl, '/').$path, $options);
                 $decoded = json_decode($response->getBody()->getContents(), true, 512, JSON_THROW_ON_ERROR);
             } catch (BadResponseException $e) {
-                $status = $e->getResponse()->getStatusCode();
-                $retryable = $status === 429 || ($status >= 500 && $method !== 'POST');
-                $delay = $retryable && $attempt < $maxRetries
-                    ? $this->retryDelay($attempt, in_array($status, [429, 503], true) ? $this->retryAfter($e) : null)
-                    : null;
-
-                if ($delay !== null && ! $this->endsBeforeDeadline($delay, $deadline)) {
-                    $retrySkipped = true;
-                    $delay = null;
+                if ($this->retrier->retry($e, $method, $path, $attempt, $deadline, $maxRetries, $retrySkipped)) {
+                    continue;
                 }
 
-                if ($delay === null) {
-                    $this->handleBadResponse($e);
-                }
-
-                ($this->sleeper)($delay);
-
-                continue;
+                $this->handleBadResponse($e);
             } catch (JsonException $e) {
                 throw new ApiException('Invalid API response: malformed JSON', 0, $e);
             } catch (GuzzleException $e) {
-                // A run start is only repeated when the request provably never reached the server.
-                $retryable = $method !== 'POST' || $this->neverSent($e);
-
-                if ($retryable && $attempt < $maxRetries) {
-                    $delay = $this->retryDelay($attempt, null) ?? 0.0;
-
-                    if ($this->endsBeforeDeadline($delay, $deadline)) {
-                        ($this->sleeper)($delay);
-
-                        continue;
-                    }
-
-                    $retrySkipped = true;
+                if ($this->retrier->retry($e, $method, $path, $attempt, $deadline, $maxRetries, $retrySkipped)) {
+                    continue;
                 }
 
                 throw new ApiException('API request failed: '.$e->getMessage(), 0, $e);
@@ -812,88 +784,12 @@ final class Client
         }
     }
 
-    /**
-     * True only when the failure proves that the request never reached the server, so repeating it cannot start a
-     * second run. A `ConnectException` alone is not enough: Guzzle 7 also throws it when a sent request times out
-     * (cURL error 28) or gets no reply (52).
-     */
-    private function neverSent(GuzzleException $e): bool
-    {
-        if (! $e instanceof ConnectException) {
-            return false;
-        }
-
-        if ($e instanceof ConnectTimeoutException) {
-            return true;
-        }
-
-        if (preg_match('/^cURL error (\d+):/', $e->getMessage(), $match) === 1) {
-            return in_array((int) $match[1], self::UNSENT_CURL_ERRORS, true);
-        }
-
-        return preg_match('/timed?[ -]?out/i', $e->getMessage()) !== 1;
-    }
-
-    /** The per-request timeout, cut to the time left until the deadline (plus a short grace period). */
-    private function cappedTimeout(int $timeout, ?float $deadline): int
-    {
-        if ($deadline === null) {
-            return $timeout;
-        }
-
-        $left = (int) ceil(max(0.0, $deadline - microtime(true))) + self::DEADLINE_GRACE_SECONDS;
-
-        return $timeout > 0 ? min($timeout, $left) : $left;
-    }
-
-    /** Whether a wait of this many seconds ends before the deadline. */
-    private function endsBeforeDeadline(float $delay, ?float $deadline): bool
-    {
-        return $deadline === null || microtime(true) + $delay < $deadline;
-    }
-
-    /**
-     * Seconds to wait before the next retry: exponential from the base delay with 50 to 100 percent jitter, at least
-     * the server's `Retry-After`. Null when the server asks for a longer wait than the configured maximum.
-     */
-    private function retryDelay(int $attempt, ?int $retryAfter): ?float
-    {
-        if ($retryAfter !== null && $retryAfter > $this->config->retryMaxDelay) {
-            return null;
-        }
-
-        $backoff = min($this->config->retryMaxDelay, $this->config->retryBaseDelay * (2 ** $attempt));
-        $jittered = $backoff * (random_int(500, 1000) / 1000);
-
-        return max($jittered, (float) ($retryAfter ?? 0));
-    }
-
-    /**
-     * Seconds from a `Retry-After` header, given either as a number or as an HTTP date. Null when missing or invalid.
-     */
-    private function retryAfter(BadResponseException $e): ?int
-    {
-        $value = trim($e->getResponse()->getHeaderLine('Retry-After'));
-
-        if ($value === '') {
-            return null;
-        }
-
-        if (ctype_digit($value)) {
-            return (int) $value;
-        }
-
-        $timestamp = strtotime($value);
-
-        return $timestamp === false ? null : max(0, $timestamp - time());
-    }
-
     private function handleBadResponse(BadResponseException $e): never
     {
         $response = $e->getResponse();
 
         if ($response->getStatusCode() === 429) {
-            throw new RateLimitException('Rate limit exceeded', $this->retryAfter($e) ?? 60);
+            throw new RateLimitException('Rate limit exceeded', Retrier::retryAfter($e->getResponse()) ?? 60);
         }
 
         if ($response->getStatusCode() === 402) {
