@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace ImageConverter;
 
 use ImageConverter\DTO\ConvertedImage;
+use ImageConverter\Support\Inputs;
 
 /**
  * Helpers to find images that got no result row in the list returned by `Client::convert()`.
@@ -25,7 +26,7 @@ final class Results
      */
     public static function inputCount(array $urls, array $uploadKeys = []): int
     {
-        return count(self::normalizeAll($urls, true)) + count(self::normalizeAll($uploadKeys, false));
+        return count(Inputs::unique($urls, true)) + count(Inputs::unique($uploadKeys, false));
     }
 
     /**
@@ -97,50 +98,12 @@ final class Results
     {
         $pending = [];
 
-        foreach (self::normalizeAll($inputs, $isUrl) as $key => $value) {
+        foreach (Inputs::unique($inputs, $isUrl) as $key => $value) {
             if (! isset($done[$value])) {
                 $pending[$key] = $inputs[$key];
             }
         }
 
         return $pending;
-    }
-
-    /**
-     * Normalized values keyed by the original key; empty and repeated values are dropped (first occurrence wins).
-     *
-     * @param  array<int, string>  $inputs
-     * @return array<int, string>
-     */
-    private static function normalizeAll(array $inputs, bool $isUrl): array
-    {
-        $result = [];
-        $seen = [];
-
-        foreach ($inputs as $key => $raw) {
-            $value = self::normalize($raw, $isUrl);
-
-            if ($value === '' || isset($seen[$value])) {
-                continue;
-            }
-
-            $seen[$value] = true;
-            $result[$key] = $value;
-        }
-
-        return $result;
-    }
-
-    private static function normalize(string $raw, bool $isUrl): string
-    {
-        $pattern = '/[\x00-\x1f\x7f]|[\x{80}-\x{9f}\x{200b}-\x{200f}\x{2028}-\x{202e}\x{2060}-\x{2069}\x{feff}]/u';
-        $value = preg_replace($pattern, '', $raw);
-        $value = trim($value ?? $raw);
-
-        if ($isUrl && $value !== '' && preg_match('#^https?://#i', $value) !== 1) {
-            $value = 'https://'.$value;
-        }
-
-        return $value;
     }
 }

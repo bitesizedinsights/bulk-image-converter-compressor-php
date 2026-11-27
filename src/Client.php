@@ -13,9 +13,11 @@ use ImageConverter\DTO\ConvertedImage;
 use ImageConverter\DTO\RetryEvent;
 use ImageConverter\DTO\Run;
 use ImageConverter\Exception\ApiException;
+use ImageConverter\Exception\BatchException;
 use ImageConverter\Exception\MissingApiKeyException;
 use ImageConverter\Exception\RateLimitException;
 use ImageConverter\Exception\SpendingLimitException;
+use ImageConverter\Support\Inputs;
 use ImageConverter\Support\Retrier;
 use InvalidArgumentException;
 use JsonException;
@@ -138,13 +140,157 @@ final class Client
             $runTimeout,
         );
 
-        $deadline = microtime(true) + $this->config->timeout;
-        $run = $this->startRun($input, $runTimeout, $deadline);
-        $run = $this->awaitRun($run, $deadline, $this->config->timeout, ownRun: true);
+        return $this->execute($input, $runTimeout);
+    }
 
-        $datasetId = $this->datasetId($run);
+    /**
+     * Like `convert()` for any number of images: they are split into batches of at most `$batchSize` (URLs and upload
+     * keys counted together), and each batch is a separate Actor run (billed on its own), run one after another.
+     *
+     * URLs and upload keys are first deduplicated over the whole input, the way the Actor does it within a run
+     * (control characters and surrounding whitespace stripped, a scheme-less URL gets `https://`, empty values
+     * dropped, the first occurrence wins), so no image is converted twice. `ConvertedImage::$index` is rewritten to
+     * the 1-based position in that deduplicated list of the whole input (URLs first, then upload keys), so the
+     * `Results` helpers work on the complete input. Results come back batch by batch, within a batch in the order of
+     * the run's dataset. When nothing is left to convert, an empty list is returned without any request.
+     *
+     * Each run stores its files in its own default key-value store: use `outputUrl`. `outputKey` is not rewritten;
+     * the number it starts with counts within the batch, and keys of different batches can be equal.
+     *
+     * When a batch returns fewer rows than it has images (free plan, spending limit, shutdown), no further batch is
+     * started, so a limit is not run into with more billed runs. Use `Results::unprocessed()` with the whole input to
+     * find what is left. Failed rows, including `time_limit`, count as rows.
+     *
+     * `Config::$timeout` and the run timeout apply to each batch, not to the whole call. A full batch of 1000 images
+     * may not finish within the default of 600 seconds: raise the timeout or lower `$batchSize`.
+     *
+     * All arguments are validated before the first run is started. For the other parameters see `convert()`.
+     *
+     * @param  array<int|string, string>  $urls  Any number of URLs.
+     * @param  array<int|string, string>  $uploadKeys  Any number of upload keys.
+     * @param  int  $batchSize  Images per run, 1 to 1000.
+     * @return list<ConvertedImage>
+     *
+     * @throws InvalidArgumentException when an argument is invalid; nothing was started
+     * @throws MissingApiKeyException
+     * @throws BatchException when a batch fails for any other reason; it holds the results of the earlier batches
+     */
+    public function convertMany(
+        array $urls = [],
+        OutputFormat $outputFormat = OutputFormat::WebP,
+        int $quality = 80,
+        ?int $maxWidth = null,
+        ?int $maxHeight = null,
+        ?bool $keepAspectRatio = null,
+        ?bool $stripMetadata = null,
+        ?string $backgroundColor = null,
+        array $uploadKeys = [],
+        ?string $uploadStoreName = null,
+        ?int $runTimeout = null,
+        int $batchSize = self::MAX_IMAGES,
+    ): array {
+        if ($batchSize < 1 || $batchSize > self::MAX_IMAGES) {
+            throw new InvalidArgumentException('batchSize must be 1 to '.self::MAX_IMAGES.", got {$batchSize}");
+        }
 
-        return $this->fetchImages($datasetId, max($deadline, microtime(true) + self::RESULTS_WINDOW_SECONDS));
+        $this->validateRunTimeout($runTimeout);
+        $this->validateItems($urls, $uploadKeys);
+        $this->validateOptions($quality, $maxWidth, $maxHeight, $backgroundColor, $uploadStoreName);
+
+        // [kind, original key, original string] of every first occurrence, in the Actor's order.
+        $items = [];
+
+        foreach (['urls' => $urls, 'uploadKeys' => $uploadKeys] as $kind => $values) {
+            foreach (Inputs::unique($values, $kind === 'urls') as $key => $unused) {
+                $items[] = [$kind, $key, $values[$key]];
+            }
+        }
+
+        $batches = array_chunk($items, $batchSize);
+        $results = [];
+        $offset = 0;
+
+        foreach ($batches as $number => $batch) {
+            $runId = null;
+            $inputs = $this->byKind($batch);
+
+            try {
+                $input = $this->input(array_values($inputs['urls']), array_values($inputs['uploadKeys']), [
+                    'outputFormat' => $outputFormat->value,
+                    'quality' => $quality,
+                ], [
+                    'uploadStoreName' => $uploadStoreName,
+                    'maxWidth' => $maxWidth,
+                    'maxHeight' => $maxHeight,
+                    'keepAspectRatio' => $keepAspectRatio,
+                    'stripMetadata' => $stripMetadata,
+                    'backgroundColor' => $backgroundColor,
+                ]);
+                $images = $this->reindex($this->execute($input, $runTimeout, $runId), $offset, count($batch));
+            } catch (Throwable $e) {
+                // Without a key nothing was sent; there is nothing to preserve.
+                if ($e instanceof MissingApiKeyException && $results === []) {
+                    throw $e;
+                }
+
+                $runId ??= $e instanceof ApiException ? $e->runId : null;
+
+                throw new BatchException(
+                    $e,
+                    $results,
+                    $number + 1,
+                    count($batches),
+                    $inputs,
+                    $this->byKind(array_slice($items, $offset + count($batch))),
+                    $runId,
+                );
+            }
+
+            array_push($results, ...$images);
+            $offset += count($batch);
+
+            if (count($images) < count($batch)) {
+                break;
+            }
+        }
+
+        return $results;
+    }
+
+    /**
+     * @param  list<array{string, int|string, string}>  $items
+     * @return array{urls: array<int|string, string>, uploadKeys: array<int|string, string>}
+     */
+    private function byKind(array $items): array
+    {
+        $result = ['urls' => [], 'uploadKeys' => []];
+
+        foreach ($items as [$kind, $key, $value]) {
+            $result[$kind === 'urls' ? 'urls' : 'uploadKeys'][$key] = $value;
+        }
+
+        return $result;
+    }
+
+    /**
+     * Turns each row's index within its run into the index within the whole input.
+     *
+     * @param  list<ConvertedImage>  $images
+     * @param  int  $offset  Images of all earlier batches.
+     * @param  int  $size  Images of this batch.
+     * @return list<ConvertedImage>
+     *
+     * @throws ApiException when a row has an index its batch cannot have
+     */
+    private function reindex(array $images, int $offset, int $size): array
+    {
+        return array_map(static function (ConvertedImage $image) use ($offset, $size): ConvertedImage {
+            if ($image->index < 1 || $image->index > $size) {
+                throw new ApiException("Invalid dataset item: index {$image->index} is outside 1 to {$size}");
+            }
+
+            return ConvertedImage::fromArray(['index' => $offset + $image->index] + $image->toArray());
+        }, $images);
     }
 
     /**
@@ -219,29 +365,38 @@ final class Client
         ?string $uploadStoreName,
         ?int $runTimeout,
     ): array {
-        if ($runTimeout !== null && $runTimeout < 0) {
-            throw new InvalidArgumentException(
-                'runTimeout must be a positive number of seconds, or 0 for the Actor default'
-            );
-        }
+        $this->validateRunTimeout($runTimeout);
+        $this->validateCount($urls, $uploadKeys);
+        $this->validateItems($urls, $uploadKeys);
+        $this->validateOptions($quality, $maxWidth, $maxHeight, $backgroundColor, $uploadStoreName);
 
-        $this->validate($urls, $uploadKeys, $quality, $maxWidth, $maxHeight, $backgroundColor, $uploadStoreName);
-
-        $input = [
+        return $this->input($urls, $uploadKeys, [
             'outputFormat' => $outputFormat->value,
             'quality' => $quality,
-        ];
-
-        $optional = [
-            'urls' => $urls === [] ? null : $urls,
-            'uploadKeys' => $uploadKeys === [] ? null : $uploadKeys,
+        ], [
             'uploadStoreName' => $uploadStoreName,
             'maxWidth' => $maxWidth,
             'maxHeight' => $maxHeight,
             'keepAspectRatio' => $keepAspectRatio,
             'stripMetadata' => $stripMetadata,
             'backgroundColor' => $backgroundColor,
-        ];
+        ]);
+    }
+
+    /**
+     * @param  array<mixed>  $urls
+     * @param  array<mixed>  $uploadKeys
+     * @param  array<string, mixed>  $required
+     * @param  array<string, mixed>  $optional  Left out of the input when null.
+     * @return array<string, mixed>
+     */
+    private function input(array $urls, array $uploadKeys, array $required, array $optional): array
+    {
+        $input = $required;
+        $optional = [
+            'urls' => $urls === [] ? null : $urls,
+            'uploadKeys' => $uploadKeys === [] ? null : $uploadKeys,
+        ] + $optional;
 
         foreach ($optional as $key => $value) {
             if ($value !== null) {
@@ -253,18 +408,39 @@ final class Client
     }
 
     /**
-     * @param  list<string>  $urls
-     * @param  list<string>  $uploadKeys
+     * Runs the Actor once and returns its rows.
+     *
+     * @param  array<string, mixed>  $input
+     * @param  string|null  $runId  Set to the run's ID as soon as it is started.
+     * @return list<ConvertedImage>
      */
-    private function validate(
-        array $urls,
-        array $uploadKeys,
-        int $quality,
-        ?int $maxWidth,
-        ?int $maxHeight,
-        ?string $backgroundColor,
-        ?string $uploadStoreName = null,
-    ): void {
+    private function execute(array $input, ?int $runTimeout, ?string &$runId = null): array
+    {
+        $deadline = microtime(true) + $this->config->timeout;
+        $run = $this->startRun($input, $runTimeout, $deadline);
+        $runId = is_string($run['id'] ?? null) ? $run['id'] : null;
+        $run = $this->awaitRun($run, $deadline, $this->config->timeout, ownRun: true);
+
+        $datasetId = $this->datasetId($run);
+
+        return $this->fetchImages($datasetId, max($deadline, microtime(true) + self::RESULTS_WINDOW_SECONDS));
+    }
+
+    private function validateRunTimeout(?int $runTimeout): void
+    {
+        if ($runTimeout !== null && $runTimeout < 0) {
+            throw new InvalidArgumentException(
+                'runTimeout must be a positive number of seconds, or 0 for the Actor default'
+            );
+        }
+    }
+
+    /**
+     * @param  array<mixed>  $urls
+     * @param  array<mixed>  $uploadKeys
+     */
+    private function validateCount(array $urls, array $uploadKeys): void
+    {
         $total = count($urls) + count($uploadKeys);
 
         if ($total === 0) {
@@ -274,15 +450,34 @@ final class Client
         if ($total > self::MAX_IMAGES) {
             throw new InvalidArgumentException('At most '.self::MAX_IMAGES.' images per run are allowed');
         }
+    }
 
+    /**
+     * @param  array<mixed>  $urls
+     * @param  array<mixed>  $uploadKeys
+     */
+    private function validateItems(array $urls, array $uploadKeys): void
+    {
         foreach (['urls' => [$urls, 2048], 'uploadKeys' => [$uploadKeys, 256]] as $name => [$items, $max]) {
             foreach ($items as $i => $item) {
+                if (! is_string($item)) {
+                    throw new InvalidArgumentException("{$name}[{$i}] must be a string");
+                }
+
                 if ($this->length($item) > $max) {
                     throw new InvalidArgumentException("{$name}[{$i}] must be at most {$max} characters long");
                 }
             }
         }
+    }
 
+    private function validateOptions(
+        int $quality,
+        ?int $maxWidth,
+        ?int $maxHeight,
+        ?string $backgroundColor,
+        ?string $uploadStoreName,
+    ): void {
         if ($uploadStoreName !== null && $this->length($uploadStoreName) > 63) {
             throw new InvalidArgumentException('uploadStoreName must be at most 63 characters long');
         }
