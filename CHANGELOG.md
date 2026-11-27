@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- The public `abort()` is now bounded by `Config::$timeout` like the other calls: a retry whose wait would pass it is skipped and the request timeout is cut to the time left plus 5 seconds.
 - Retry safety: starting a run is no longer repeated after a `ConnectException` that can mean the request was already sent. Guzzle 7 reports a read timeout (cURL error 28) and an empty reply (52) that way, so a run could be started and billed twice. It is now repeated only after a 429 or when the request provably never left (cURL errors 5, 6, 7 and 35, a Guzzle 8 `ConnectTimeoutException`, or a connection failure without a cURL code that is not a timeout). On Guzzle 7 a connect timeout is therefore no longer retried on the run start.
 - Retries now respect `Config::$timeout`, which covers the run start, the wait and all retries: a retry whose wait would pass it is skipped, each request's timeout is cut to the time left plus 5 seconds (reading the results of a successful run keeps at least 30 seconds), and when polling fails because the time is used up the run is aborted (best effort).
 - `Retry-After` is now honoured on 503 responses too, not only on 429. One longer than `retryMaxDelay` is not waited out and the error is thrown.

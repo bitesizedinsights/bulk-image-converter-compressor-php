@@ -461,7 +461,11 @@ final class Client
     public function abort(Run|string $run): Run
     {
         $runId = $this->validRunId($run);
-        $result = $this->request('POST', "/actor-runs/{$runId}/abort");
+        $result = $this->request(
+            'POST',
+            "/actor-runs/{$runId}/abort",
+            deadline: microtime(true) + $this->config->timeout,
+        );
 
         return $this->parseRun($this->runData($result), $runId);
     }
