@@ -12,6 +12,7 @@ use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\Exception\ConnectTimeoutException;
 use GuzzleHttp\Exception\GuzzleException;
 use ImageConverter\DTO\ConvertedImage;
+use ImageConverter\DTO\Run;
 use ImageConverter\Exception\ApiException;
 use ImageConverter\Exception\MissingApiKeyException;
 use ImageConverter\Exception\RateLimitException;
@@ -30,6 +31,12 @@ final class Client
 
     private const RUNNING_STATUSES = ['READY', 'RUNNING'];
 
+    /** Further statuses `wait()` sits out: the run is ending but its final status is not set yet. */
+    private const ENDING_STATUSES = ['ABORTING', 'TIMING-OUT'];
+
+    /** Apify IDs are plain alphanumeric strings; nothing else may become part of a URL path. */
+    private const RUN_ID_PATTERN = '/\A[A-Za-z0-9]{1,64}\z/';
+
     /** Seconds a request may run past the deadline, so a long poll of the remaining time can still answer. */
     private const DEADLINE_GRACE_SECONDS = 5;
 
@@ -47,6 +54,9 @@ final class Client
     private readonly ClientInterface $http;
 
     private ?string $apiKey = null;
+
+    /** Apify's internal ID of the configured Actor, once a run start or a lookup has told it. */
+    private ?string $actorApiId = null;
 
     /** @var Closure(float): void */
     private readonly Closure $sleeper;
@@ -114,6 +124,101 @@ final class Client
         ?string $uploadStoreName = null,
         ?int $runTimeout = null,
     ): array {
+        $input = $this->buildInput(
+            $urls,
+            $outputFormat,
+            $quality,
+            $maxWidth,
+            $maxHeight,
+            $keepAspectRatio,
+            $stripMetadata,
+            $backgroundColor,
+            $uploadKeys,
+            $uploadStoreName,
+            $runTimeout,
+        );
+
+        $deadline = microtime(true) + $this->config->timeout;
+        $run = $this->startRun($input, $runTimeout, $deadline);
+        $run = $this->awaitRun($run, $deadline, $this->config->timeout, ownRun: true);
+
+        $datasetId = $this->datasetId($run);
+
+        return $this->fetchImages($datasetId, max($deadline, microtime(true) + self::RESULTS_WINDOW_SECONDS));
+    }
+
+    /**
+     * Start a conversion run and return at once; the run keeps going on Apify. Takes the arguments of `convert()`.
+     * Keep `$run->id`, then collect the rows with `wait()` and `results()`, in this or a later process.
+     *
+     * A run start is billed, so it is only repeated when it provably had no effect (HTTP 429 or a request that never
+     * left). After a server error, a timeout or an unreadable response a run may exist: check before calling again.
+     *
+     * @param  list<string>  $urls
+     * @param  list<string>  $uploadKeys
+     * @param  int|null  $runTimeout  Apify run time limit in seconds for this call, 0 = the Actor's own limit; null =
+     *                                `Config::$runTimeout`, which itself defaults to `Config::$timeout`.
+     *
+     * @throws InvalidArgumentException When an argument is outside the limits the Actor accepts.
+     * @throws ApiException `$runId` is set when the run was created but the response could not be fully read.
+     * @throws RateLimitException
+     * @throws SpendingLimitException
+     */
+    public function start(
+        array $urls = [],
+        OutputFormat $outputFormat = OutputFormat::WebP,
+        int $quality = 80,
+        ?int $maxWidth = null,
+        ?int $maxHeight = null,
+        ?bool $keepAspectRatio = null,
+        ?bool $stripMetadata = null,
+        ?string $backgroundColor = null,
+        array $uploadKeys = [],
+        ?string $uploadStoreName = null,
+        ?int $runTimeout = null,
+    ): Run {
+        $input = $this->buildInput(
+            $urls,
+            $outputFormat,
+            $quality,
+            $maxWidth,
+            $maxHeight,
+            $keepAspectRatio,
+            $stripMetadata,
+            $backgroundColor,
+            $uploadKeys,
+            $uploadStoreName,
+            $runTimeout,
+        );
+
+        $run = $this->parseRun($this->startRun($input, $runTimeout, microtime(true) + $this->config->timeout));
+        $this->actorApiId ??= $run->actId;
+
+        return $run;
+    }
+
+    /**
+     * Validates the arguments of one run and builds the Actor input.
+     *
+     * @param  list<string>  $urls
+     * @param  list<string>  $uploadKeys
+     * @return array<string, mixed>
+     *
+     * @throws InvalidArgumentException
+     */
+    private function buildInput(
+        array $urls,
+        OutputFormat $outputFormat,
+        int $quality,
+        ?int $maxWidth,
+        ?int $maxHeight,
+        ?bool $keepAspectRatio,
+        ?bool $stripMetadata,
+        ?string $backgroundColor,
+        array $uploadKeys,
+        ?string $uploadStoreName,
+        ?int $runTimeout,
+    ): array {
         if ($runTimeout !== null && $runTimeout < 0) {
             throw new InvalidArgumentException(
                 'runTimeout must be a positive number of seconds, or 0 for the Actor default'
@@ -144,13 +249,7 @@ final class Client
             }
         }
 
-        $deadline = microtime(true) + $this->config->timeout;
-        $run = $this->startRun($input, $runTimeout, $deadline);
-        $run = $this->awaitRun($run, $deadline);
-
-        $datasetId = $this->datasetId($run);
-
-        return $this->fetchImages($datasetId, max($deadline, microtime(true) + self::RESULTS_WINDOW_SECONDS));
+        return $input;
     }
 
     /**
@@ -232,9 +331,12 @@ final class Client
 
     /**
      * @param  array<mixed>  $run
+     * @param  int  $limit  The seconds the deadline stands for, as named in the timeout error.
+     * @param  bool  $ownRun  True within `convert()`, which started the run: it is aborted when the time is up. False
+     *                        in `wait()`, which leaves it running and also sits out ABORTING and TIMING-OUT.
      * @return array<mixed>
      */
-    private function awaitRun(array $run, float $deadline): array
+    private function awaitRun(array $run, float $deadline, int $limit, bool $ownRun): array
     {
         while (true) {
             $status = $run['status'] ?? null;
@@ -258,7 +360,7 @@ final class Client
                 );
             }
 
-            if (! is_string($status) || ! in_array($status, self::RUNNING_STATUSES, true)) {
+            if (! is_string($status) || ! $this->isPending($status, $ownRun)) {
                 throw new ApiException('Invalid API response: missing or unknown run status');
             }
 
@@ -266,9 +368,9 @@ final class Client
 
             if ($remaining <= 0) {
                 $runId = is_string($run['id'] ?? null) ? $run['id'] : null;
-                $message = "Actor run did not finish within {$this->config->timeout} seconds";
+                $message = "Actor run did not finish within {$limit} seconds";
 
-                if ($runId !== null && $this->tryAbort($runId)) {
+                if ($ownRun && $runId !== null && $this->tryAbort($runId)) {
                     $message .= ' and was aborted';
                 }
 
@@ -284,12 +386,12 @@ final class Client
             $retrySkipped = false;
 
             try {
-                $result = $this->request('GET', "/actor-runs/{$runId}", [
+                $result = $this->request('GET', '/actor-runs/'.rawurlencode($runId), [
                     'query' => ['waitForFinish' => min(self::MAX_WAIT_SECONDS, $remaining)],
                 ], deadline: $deadline, retrySkipped: $retrySkipped);
             } catch (ApiException $e) {
                 // The deadline ends the wait here, so the run must not keep running and billing.
-                if ($retrySkipped || microtime(true) >= $deadline) {
+                if ($ownRun && ($retrySkipped || microtime(true) >= $deadline)) {
                     $this->tryAbort($runId);
                 }
 
@@ -298,6 +400,12 @@ final class Client
 
             $run = $this->runData($result);
         }
+    }
+
+    private function isPending(string $status, bool $ownRun): bool
+    {
+        return in_array($status, self::RUNNING_STATUSES, true)
+            || (! $ownRun && in_array($status, self::ENDING_STATUSES, true));
     }
 
     /**
@@ -329,7 +437,8 @@ final class Client
     private function tryAbort(string $runId): bool
     {
         try {
-            $this->request('POST', "/actor-runs/{$runId}/abort", [], min(10, $this->config->requestTimeout), 0);
+            $path = '/actor-runs/'.rawurlencode($runId).'/abort';
+            $this->request('POST', $path, [], min(10, $this->config->requestTimeout), 0);
 
             return true;
         } catch (Throwable) {
@@ -338,15 +447,210 @@ final class Client
     }
 
     /**
-     * Aborts an Actor run, for example one that is no longer needed. The run keeps its data, its status becomes ABORTED.
+     * Asks Apify to stop a run, for example one that is no longer needed. The run keeps its data. Does not check which
+     * Actor the run belongs to.
      *
-     * @param  string  $runId  The run ID, as found in `ApiException::$runId`.
+     * @param  Run|string  $run  The run or its ID, as found in `ApiException::$runId`.
+     * @return Run The run in its new state, usually ABORTING or ABORTED.
      *
+     * @throws InvalidArgumentException when the run ID is not a valid Apify ID; nothing was sent
      * @throws ApiException
+     * @throws RateLimitException
+     * @throws SpendingLimitException
      */
-    public function abort(string $runId): void
+    public function abort(Run|string $run): Run
     {
-        $this->request('POST', '/actor-runs/'.rawurlencode($runId).'/abort');
+        $runId = $this->validRunId($run);
+        $result = $this->request('POST', "/actor-runs/{$runId}/abort");
+
+        return $this->parseRun($this->runData($result), $runId);
+    }
+
+    /**
+     * Look a run of the configured Actor up once, without waiting for it. Any status is returned, none throws.
+     *
+     * @throws InvalidArgumentException when the run ID is not a valid Apify ID; nothing was sent
+     * @throws ApiException when the run does not exist (code 404) or belongs to another Actor
+     * @throws RateLimitException
+     * @throws SpendingLimitException
+     */
+    public function getRun(string $runId): Run
+    {
+        $runId = $this->validRunId($runId);
+
+        return $this->parseRun($this->fetchOwnRun($runId, microtime(true) + $this->config->timeout), $runId);
+    }
+
+    /**
+     * Wait until a run has finished successfully. Accepts the run from `start()` or just its ID. Unlike `convert()`,
+     * it never aborts the run: when the time is up the run keeps going and you can wait again or call `abort()`.
+     *
+     * @param  int|null  $timeout  Seconds to wait at most, 0 = check once; null = `Config::$timeout`.
+     * @return Run The run with status SUCCEEDED.
+     *
+     * @throws InvalidArgumentException when the run ID is not a valid Apify ID or `$timeout` is negative
+     * @throws ApiException when the run ends as FAILED, ABORTED or TIMED-OUT, does not finish in time, does not exist
+     *                      or belongs to another Actor
+     * @throws RateLimitException
+     * @throws SpendingLimitException
+     */
+    public function wait(Run|string $run, ?int $timeout = null): Run
+    {
+        if ($timeout !== null && $timeout < 0) {
+            throw new InvalidArgumentException('timeout must be 0 or a positive number of seconds');
+        }
+
+        $runId = $this->validRunId($run);
+        $limit = $timeout ?? $this->config->timeout;
+        $deadline = microtime(true) + $limit;
+        // Without time to poll, an unfinished `Run` may be out of date, so it is looked up.
+        if ($limit === 0 && $run instanceof Run && ! $run->isFinished()) {
+            $run = $runId;
+        }
+
+        $data = $this->awaitRun($this->runState($run, $deadline), $deadline, $limit, ownRun: false);
+
+        return $this->parseRun($data, $runId);
+    }
+
+    /**
+     * Read the rows of a successful run, like `convert()` returns them. Does not wait: call `wait()` first. A `Run`
+     * object is taken at its word, so pass the one `wait()` returned or the run ID, which is looked up again.
+     *
+     * @return list<ConvertedImage>
+     *
+     * @throws InvalidArgumentException when the run ID is not a valid Apify ID; nothing was sent
+     * @throws ApiException when the run has not succeeded (unfinished, failed, aborted or timed out), does not exist
+     *                      or belongs to another Actor, or the dataset cannot be mapped
+     * @throws RateLimitException
+     * @throws SpendingLimitException
+     */
+    public function results(Run|string $run): array
+    {
+        $runId = $this->validRunId($run);
+        $deadline = microtime(true) + max($this->config->timeout, self::RESULTS_WINDOW_SECONDS);
+        $current = $this->parseRun($this->runState($run, $deadline), $runId);
+
+        if (! $current->isSuccessful()) {
+            $hint = $current->isFinished() ? '' : ', call wait()';
+
+            throw new ApiException(
+                "Run {$runId} has status {$current->status->value}; results are only read after SUCCEEDED{$hint}",
+                runId: $runId,
+                statusMessage: $this->statusMessage($current->toArray()),
+            );
+        }
+
+        return $this->fetchImages($this->datasetId($current->toArray()), $deadline);
+    }
+
+    private function validRunId(Run|string $run): string
+    {
+        $runId = $run instanceof Run ? $run->id : $run;
+
+        if (preg_match(self::RUN_ID_PATTERN, $runId) !== 1) {
+            throw new InvalidArgumentException('The run ID must be 1 to 64 letters and digits');
+        }
+
+        return $runId;
+    }
+
+    /**
+     * The data of a run that belongs to the configured Actor. A `Run` that names its Actor is used as it is; an ID,
+     * or a `Run` without `actId`, is looked up.
+     *
+     * @return array<mixed>
+     */
+    private function runState(Run|string $run, float $deadline): array
+    {
+        if ($run instanceof Run && $run->actId !== null) {
+            $this->assertOwnActor($run->actId, $run->id, $deadline);
+
+            return $run->toArray();
+        }
+
+        return $this->fetchOwnRun($this->validRunId($run), $deadline);
+    }
+
+    /**
+     * @return array<mixed>
+     */
+    private function fetchOwnRun(string $runId, float $deadline): array
+    {
+        try {
+            $data = $this->runData($this->request('GET', "/actor-runs/{$runId}", deadline: $deadline));
+        } catch (ApiException $e) {
+            if ($e->getCode() !== 404) {
+                throw $e;
+            }
+
+            throw new ApiException("Run {$runId} was not found", 404, $e, $runId);
+        }
+
+        if (($data['id'] ?? null) !== $runId) {
+            throw new ApiException('Invalid API response: missing or different run ID', runId: $runId);
+        }
+
+        $this->assertOwnActor($data['actId'] ?? null, $runId, $deadline);
+
+        return $data;
+    }
+
+    /**
+     * Runs of other Actors have other dataset rows, so they are rejected. `Config::$actorId` is usually a name while a
+     * run only carries the Actor's internal ID, which is looked up once per client when no run start has told it.
+     */
+    private function assertOwnActor(mixed $actId, string $runId, float $deadline): void
+    {
+        if (! is_string($actId) || $actId === '') {
+            throw new ApiException('Invalid API response: missing Actor ID of the run', runId: $runId);
+        }
+
+        if ($actId === $this->config->actorId) {
+            return;
+        }
+
+        if ($this->actorApiId === null) {
+            $actor = str_replace('/', '~', $this->config->actorId);
+            $data = $this->request('GET', "/acts/{$actor}", deadline: $deadline)['data'] ?? null;
+            $id = is_array($data) ? ($data['id'] ?? null) : null;
+
+            if (! is_string($id) || $id === '') {
+                throw new ApiException('Invalid API response: missing Actor ID', runId: $runId);
+            }
+
+            $this->actorApiId = $id;
+        }
+
+        if ($actId !== $this->actorApiId) {
+            throw new ApiException("Run {$runId} belongs to another Actor", runId: $runId);
+        }
+    }
+
+    /**
+     * Maps run data to a `Run`. The error keeps the run ID whenever the data has a usable one, so a run that exists
+     * is not lost (and not started a second time) over a response that cannot be read.
+     *
+     * @param  array<mixed>  $data
+     * @param  string|null  $expectedId  The ID the data must be about, when it was asked for.
+     */
+    private function parseRun(array $data, ?string $expectedId = null): Run
+    {
+        $id = $data['id'] ?? null;
+
+        if (! is_string($id) || preg_match(self::RUN_ID_PATTERN, $id) !== 1) {
+            throw new ApiException('Invalid API response: missing or invalid run ID', runId: $expectedId);
+        }
+
+        if ($expectedId !== null && $id !== $expectedId) {
+            throw new ApiException('Invalid API response: different run ID', runId: $expectedId);
+        }
+
+        try {
+            return Run::fromArray($data);
+        } catch (InvalidArgumentException $e) {
+            throw new ApiException('Invalid API response: missing or unknown run status', 0, $e, $id);
+        }
     }
 
     /**
@@ -370,7 +674,7 @@ final class Client
     {
         $items = $this->request(
             'GET',
-            "/datasets/{$datasetId}/items",
+            '/datasets/'.rawurlencode($datasetId).'/items',
             ['query' => ['format' => 'json']],
             deadline: $deadline,
         );
