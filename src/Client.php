@@ -9,6 +9,7 @@ use GuzzleHttp\Client as HttpClient;
 use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Exception\BadResponseException;
 use GuzzleHttp\Exception\ConnectException;
+use GuzzleHttp\Exception\ConnectTimeoutException;
 use GuzzleHttp\Exception\GuzzleException;
 use ImageConverter\DTO\ConvertedImage;
 use ImageConverter\Exception\ApiException;
@@ -28,6 +29,15 @@ final class Client
     private const FAILED_STATUSES = ['FAILED', 'ABORTED', 'TIMED-OUT'];
 
     private const RUNNING_STATUSES = ['READY', 'RUNNING'];
+
+    /** Seconds a request may run past the deadline, so a long poll of the remaining time can still answer. */
+    private const DEADLINE_GRACE_SECONDS = 5;
+
+    /** Minimum seconds for reading the results of a successful run, even when the deadline is nearly used up. */
+    private const RESULTS_WINDOW_SECONDS = 30;
+
+    /** cURL errors raised before the request is sent: resolve proxy (5) or host (6), connect (7), TLS (35). */
+    private const UNSENT_CURL_ERRORS = [5, 6, 7, 35];
 
     /** Longest wait Apify allows per request. */
     private const MAX_WAIT_SECONDS = 60;
@@ -134,10 +144,13 @@ final class Client
             }
         }
 
-        $run = $this->startRun($input, $runTimeout);
-        $run = $this->awaitRun($run);
+        $deadline = microtime(true) + $this->config->timeout;
+        $run = $this->startRun($input, $runTimeout, $deadline);
+        $run = $this->awaitRun($run, $deadline);
 
-        return $this->fetchImages($this->datasetId($run));
+        $datasetId = $this->datasetId($run);
+
+        return $this->fetchImages($datasetId, max($deadline, microtime(true) + self::RESULTS_WINDOW_SECONDS));
     }
 
     /**
@@ -202,7 +215,7 @@ final class Client
      * @param  array<string, mixed>  $input
      * @return array<mixed>
      */
-    private function startRun(array $input, ?int $runTimeout = null): array
+    private function startRun(array $input, ?int $runTimeout, float $deadline): array
     {
         $actor = str_replace('/', '~', $this->config->actorId);
         $options = ['json' => $input];
@@ -212,7 +225,7 @@ final class Client
             $options['query'] = ['timeout' => $limit];
         }
 
-        $result = $this->request('POST', "/acts/{$actor}/runs", $options);
+        $result = $this->request('POST', "/acts/{$actor}/runs", $options, deadline: $deadline);
 
         return $this->runData($result);
     }
@@ -221,10 +234,8 @@ final class Client
      * @param  array<mixed>  $run
      * @return array<mixed>
      */
-    private function awaitRun(array $run): array
+    private function awaitRun(array $run, float $deadline): array
     {
-        $deadline = time() + $this->config->timeout;
-
         while (true) {
             $status = $run['status'] ?? null;
 
@@ -251,7 +262,7 @@ final class Client
                 throw new ApiException('Invalid API response: missing or unknown run status');
             }
 
-            $remaining = $deadline - time();
+            $remaining = (int) ceil($deadline - microtime(true));
 
             if ($remaining <= 0) {
                 $runId = is_string($run['id'] ?? null) ? $run['id'] : null;
@@ -270,9 +281,21 @@ final class Client
                 throw new ApiException('Invalid API response: missing run ID');
             }
 
-            $result = $this->request('GET', "/actor-runs/{$runId}", [
-                'query' => ['waitForFinish' => min(self::MAX_WAIT_SECONDS, $remaining)],
-            ]);
+            $retrySkipped = false;
+
+            try {
+                $result = $this->request('GET', "/actor-runs/{$runId}", [
+                    'query' => ['waitForFinish' => min(self::MAX_WAIT_SECONDS, $remaining)],
+                ], deadline: $deadline, retrySkipped: $retrySkipped);
+            } catch (ApiException $e) {
+                // The deadline ends the wait here, so the run must not keep running and billing.
+                if ($retrySkipped || microtime(true) >= $deadline) {
+                    $this->tryAbort($runId);
+                }
+
+                throw $e;
+            }
+
             $run = $this->runData($result);
         }
     }
@@ -343,9 +366,14 @@ final class Client
     /**
      * @return list<ConvertedImage>
      */
-    private function fetchImages(string $datasetId): array
+    private function fetchImages(string $datasetId, float $deadline): array
     {
-        $items = $this->request('GET', "/datasets/{$datasetId}/items", ['query' => ['format' => 'json']]);
+        $items = $this->request(
+            'GET',
+            "/datasets/{$datasetId}/items",
+            ['query' => ['format' => 'json']],
+            deadline: $deadline,
+        );
 
         $images = [];
 
@@ -398,6 +426,8 @@ final class Client
      * only repeated after a 429 or a failed connection, because after a 5xx or a timeout the run may already exist and
      * a repeat would bill it twice.
      *
+     * With a deadline, no retry is started whose wait would pass it and each request's timeout is cut to the time left.
+     *
      * @param  array<string, mixed>  $options
      * @return array<mixed>
      *
@@ -410,15 +440,19 @@ final class Client
         array $options = [],
         ?int $timeout = null,
         ?int $maxRetries = null,
+        ?float $deadline = null,
+        bool &$retrySkipped = false,
     ): array {
         $maxRetries ??= $this->config->maxRetries;
         $options['headers'] = [
             'Authorization' => 'Bearer '.$this->resolveApiKey(),
             'Accept' => 'application/json',
         ];
-        $options['timeout'] = $timeout ?? $this->config->requestTimeout;
+        $baseTimeout = $timeout ?? $this->config->requestTimeout;
 
         for ($attempt = 0; ; $attempt++) {
+            $options['timeout'] = $this->cappedTimeout($baseTimeout, $deadline);
+
             try {
                 $response = $this->http->request($method, rtrim($this->config->baseUrl, '/').$path, $options);
                 $decoded = json_decode($response->getBody()->getContents(), true, 512, JSON_THROW_ON_ERROR);
@@ -426,8 +460,13 @@ final class Client
                 $status = $e->getResponse()->getStatusCode();
                 $retryable = $status === 429 || ($status >= 500 && $method !== 'POST');
                 $delay = $retryable && $attempt < $maxRetries
-                    ? $this->retryDelay($attempt, $status === 429 ? $this->retryAfter($e) : null)
+                    ? $this->retryDelay($attempt, in_array($status, [429, 503], true) ? $this->retryAfter($e) : null)
                     : null;
+
+                if ($delay !== null && ! $this->endsBeforeDeadline($delay, $deadline)) {
+                    $retrySkipped = true;
+                    $delay = null;
+                }
 
                 if ($delay === null) {
                     $this->handleBadResponse($e);
@@ -439,13 +478,19 @@ final class Client
             } catch (JsonException $e) {
                 throw new ApiException('Invalid API response: malformed JSON', 0, $e);
             } catch (GuzzleException $e) {
-                // A failed connection never reached the server, so it is safe to repeat even for POST.
-                $retryable = $e instanceof ConnectException || $method !== 'POST';
+                // A run start is only repeated when the request provably never reached the server.
+                $retryable = $method !== 'POST' || $this->neverSent($e);
 
                 if ($retryable && $attempt < $maxRetries) {
-                    ($this->sleeper)($this->retryDelay($attempt, null) ?? 0.0);
+                    $delay = $this->retryDelay($attempt, null) ?? 0.0;
 
-                    continue;
+                    if ($this->endsBeforeDeadline($delay, $deadline)) {
+                        ($this->sleeper)($delay);
+
+                        continue;
+                    }
+
+                    $retrySkipped = true;
                 }
 
                 throw new ApiException('API request failed: '.$e->getMessage(), 0, $e);
@@ -457,6 +502,46 @@ final class Client
 
             return $decoded;
         }
+    }
+
+    /**
+     * True only when the failure proves that the request never reached the server, so repeating it cannot start a
+     * second run. A `ConnectException` alone is not enough: Guzzle 7 also throws it when a sent request times out
+     * (cURL error 28) or gets no reply (52).
+     */
+    private function neverSent(GuzzleException $e): bool
+    {
+        if (! $e instanceof ConnectException) {
+            return false;
+        }
+
+        if ($e instanceof ConnectTimeoutException) {
+            return true;
+        }
+
+        if (preg_match('/^cURL error (\d+):/', $e->getMessage(), $match) === 1) {
+            return in_array((int) $match[1], self::UNSENT_CURL_ERRORS, true);
+        }
+
+        return preg_match('/timed?[ -]?out/i', $e->getMessage()) !== 1;
+    }
+
+    /** The per-request timeout, cut to the time left until the deadline (plus a short grace period). */
+    private function cappedTimeout(int $timeout, ?float $deadline): int
+    {
+        if ($deadline === null) {
+            return $timeout;
+        }
+
+        $left = (int) ceil(max(0.0, $deadline - microtime(true))) + self::DEADLINE_GRACE_SECONDS;
+
+        return $timeout > 0 ? min($timeout, $left) : $left;
+    }
+
+    /** Whether a wait of this many seconds ends before the deadline. */
+    private function endsBeforeDeadline(float $delay, ?float $deadline): bool
+    {
+        return $deadline === null || microtime(true) + $delay < $deadline;
     }
 
     /**

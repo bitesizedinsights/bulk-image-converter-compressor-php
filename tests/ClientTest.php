@@ -2,7 +2,11 @@
 
 declare(strict_types=1);
 
+use GuzzleHttp\Client as HttpClient;
 use GuzzleHttp\Exception\ConnectException;
+use GuzzleHttp\Handler\MockHandler;
+use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
 use ImageConverter\Client;
@@ -19,6 +23,15 @@ function sentBody(RequestInterface $request): array
 {
     /** @var array<string, mixed> */
     return json_decode((string) $request->getBody(), true, 512, JSON_THROW_ON_ERROR);
+}
+
+/** What Guzzle throws when a sent request times out: not a ConnectException on 8, one on 7. */
+function timeoutAfterSending(): Throwable
+{
+    $class = 'GuzzleHttp\\Exception\\NetworkTimeoutException';
+    $class = class_exists($class) ? $class : ConnectException::class;
+
+    return new $class('cURL error 28: Operation timed out', new Request('POST', 'https://api.apify.com'));
 }
 
 test('convert runs the actor and maps the dataset', function () {
@@ -510,13 +523,12 @@ test('starting a run is not repeated after a 5xx', function () {
 
 test('starting a run is not repeated after a timeout', function () {
     $history = [];
-    $client = makeClient([
-        new ConnectException('cURL error 28: Operation timed out', new Request('POST', 'https://api.apify.com')),
-        runResponse(),
-    ], $history, new Config(maxRetries: 0));
+    $sleeps = [];
+    $client = makeClient([timeoutAfterSending(), runResponse()], $history, new Config, sleeps: $sleeps);
 
     expect(fn () => $client->convert(['https://example.com/a.png']))->toThrow(ApiException::class)
-        ->and($history)->toHaveCount(1);
+        ->and($history)->toHaveCount(1)
+        ->and($sleeps)->toBe([]);
 });
 
 test('a failed connection is retried, also when starting a run', function () {
@@ -727,3 +739,112 @@ test('402 with an unparseable body has a null error type and a generic message',
             ->and($e->getMessage())->toBe('Apify usage or spending limit reached (HTTP 402)');
     }
 });
+
+test('starting a run is not repeated when the request may have reached the server', function (string $message) {
+    $history = [];
+    $sleeps = [];
+    $failure = new ConnectException($message, new Request('POST', 'https://api.apify.com'));
+    $client = makeClient([$failure, runResponse()], $history, new Config, sleeps: $sleeps);
+
+    expect(fn () => $client->convert(['https://example.com/a.png']))->toThrow(ApiException::class)
+        ->and($history)->toHaveCount(1)
+        ->and($sleeps)->toBe([]);
+})->with([
+    'Guzzle 7 read timeout' => 'cURL error 28: Operation timed out after 90000 milliseconds with 0 bytes received',
+    'empty reply' => 'cURL error 52: Empty reply from server',
+    'timeout without a cURL code' => 'Connection timed out',
+]);
+
+test('starting a run is retried when the request was provably never sent', function (string $message) {
+    $history = [];
+    $sleeps = [];
+    $failure = new ConnectException($message, new Request('POST', 'https://api.apify.com'));
+    $client = makeClient([$failure, runResponse(), jsonResponse(200, [])], $history, new Config, sleeps: $sleeps);
+
+    $client->convert(['https://example.com/a.png']);
+
+    expect($history)->toHaveCount(3)->and($sleeps)->toHaveCount(1);
+})->with([
+    'DNS' => 'cURL error 6: Could not resolve host: api.apify.com',
+    'connect' => 'cURL error 7: Failed to connect to api.apify.com port 443',
+    'TLS' => 'cURL error 35: TLS connect error',
+]);
+
+test('a retry whose wait would pass the overall timeout is skipped', function () {
+    $history = [];
+    $sleeps = [];
+    $client = makeClient(
+        [jsonResponse(429, [], ['Retry-After' => '20']), runResponse()],
+        $history,
+        new Config(timeout: 10),
+        sleeps: $sleeps,
+    );
+
+    expect(fn () => $client->convert(['https://example.com/a.png']))->toThrow(RateLimitException::class)
+        ->and($history)->toHaveCount(1)
+        ->and($sleeps)->toBe([]);
+});
+
+test('the overall timeout bounds all retries together, cuts request timeouts and aborts the run', function () {
+    $history = [];
+    $sleeps = [];
+    $limited = static fn () => jsonResponse(429, [], ['Retry-After' => '1']);
+    $stack = HandlerStack::create(new MockHandler([
+        runResponse('RUNNING'), $limited(), $limited(), $limited(), runResponse('ABORTING'),
+    ]));
+    $stack->push(Middleware::history($history));
+    $client = (new Client(
+        new Config(timeout: 3, retryBaseDelay: 0.1),
+        new HttpClient(['handler' => $stack]),
+        static function (float $seconds) use (&$sleeps): void {
+            $sleeps[] = $seconds;
+            usleep((int) ($seconds * 1_000_000));
+        },
+    ))->setApifyKey('test-token');
+
+    expect(fn () => $client->convert(['https://example.com/a.png']))->toThrow(RateLimitException::class)
+        ->and($sleeps)->toBe([1.0, 1.0])
+        ->and($history)->toHaveCount(5)
+        ->and($history[1]['options']['timeout'])->toBe(8)
+        ->and($history[3]['options']['timeout'])->toBe(6)
+        ->and($history[4]['request']->getUri()->getPath())->toEndWith('/actor-runs/run1/abort');
+});
+
+test('request timeouts are cut to the time left, and reading the results keeps a minimum window', function () {
+    $history = [];
+    $client = makeClient(
+        [runResponse('RUNNING'), runResponse(), jsonResponse(200, [])],
+        $history,
+        new Config(timeout: 10),
+    );
+
+    $client->convert(['https://example.com/a.png']);
+
+    expect(array_map(static fn (array $h): mixed => $h['options']['timeout'], $history))->toBe([15, 15, 35]);
+});
+
+test('a 503 Retry-After is waited out while polling', function () {
+    $sleeps = [];
+    $client = makeClient(
+        [runResponse('RUNNING'), jsonResponse(503, [], ['Retry-After' => '5']), runResponse(), jsonResponse(200, [])],
+        config: new Config,
+        sleeps: $sleeps,
+    );
+
+    $client->convert(['https://example.com/a.png']);
+
+    expect($sleeps)->toBe([5.0]);
+});
+
+test('a 408 is not retried, neither on the run start nor while polling', function (array $responses, int $requests) {
+    $history = [];
+    $sleeps = [];
+    $client = makeClient($responses, $history, new Config, sleeps: $sleeps);
+
+    expect(fn () => $client->convert(['https://example.com/a.png']))->toThrow(ApiException::class, 'status 408')
+        ->and($history)->toHaveCount($requests)
+        ->and($sleeps)->toBe([]);
+})->with([
+    'run start' => [fn () => [jsonResponse(408, []), runResponse()], 1],
+    'poll' => [fn () => [runResponse('RUNNING'), jsonResponse(408, []), runResponse()], 2],
+]);

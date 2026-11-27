@@ -168,7 +168,7 @@ use ImageConverter\Config;
 $client = (new Client(new Config(timeout: 300, requestTimeout: 60)))->setApifyKey($apiToken);
 ```
 
-`timeout` is the longest wait for a run in seconds (default 600), `requestTimeout` limits a single HTTP request (default 90). When `timeout` expires the client aborts the run on a best-effort basis (`POST /actor-runs/{id}/abort`, 10 seconds at most, no retries) so it does not keep running and billing; the thrown `ApiException` then says the run "was aborted" and carries the run ID in `$e->runId`. If the abort itself fails, the original timeout message is thrown unchanged. Failed runs, rate limits and connection errors never trigger an abort. `$client->abort($runId)` aborts a run explicitly. `actorId` and `baseUrl` can be overridden, for example to use a copy of the Actor. Pass a Guzzle client as the second constructor argument to customize HTTP behavior.
+`timeout` is the longest wait for a run in seconds (default 600), `requestTimeout` limits a single HTTP request (default 90). When `timeout` expires the client aborts the run on a best-effort basis (`POST /actor-runs/{id}/abort`, 10 seconds at most, no retries) so it does not keep running and billing; the thrown `ApiException` then says the run "was aborted" and carries the run ID in `$e->runId`. If the abort itself fails, the original timeout message is thrown unchanged. Failed runs never trigger an abort, and rate limits and connection errors only when they use up `timeout` while polling (see Retries and Backoff). `$client->abort($runId)` aborts a run explicitly. `actorId` and `baseUrl` can be overridden, for example to use a copy of the Actor. Pass a Guzzle client as the second constructor argument to customize HTTP behavior.
 
 ### Run timeout
 
@@ -184,10 +184,12 @@ $client->convert($urls, runTimeout: 120); // this call only
 Failed requests are retried automatically, by default up to 3 times with exponential backoff (1 s, 2 s, 4 s, each with 50 to 100 percent jitter, at most 30 s):
 
 - **Rate limits (429):** retried after at least the `Retry-After` time, given as seconds or as an HTTP date. Without the header plain backoff is used. If the server asks for more than `retryMaxDelay`, a `RateLimitException` is thrown right away.
-- **Server errors (5xx) and connection failures:** retried for reading results and polling.
-- **Starting a run:** only retried after a 429 or a failed connection. After a 5xx or a timeout the run may already exist, and a repeat would be billed twice, so the error is thrown instead.
+- **Server errors (5xx) and connection failures:** retried for reading results and polling. A `Retry-After` on a 503 is honoured the same way (a longer one than `retryMaxDelay` throws an `ApiException` right away).
+- **Starting a run:** only retried after a 429, or after a connection failure that shows the request was never sent (DNS, connect or TLS error, and on Guzzle 8 a connect timeout). After a 5xx or any other timeout the run may already exist, and a repeat would be billed twice, so the error is thrown instead. Guzzle 7 reports a connect timeout like a read timeout (cURL error 28), so there neither is repeated.
 - **Usage or spending limit (402):** never retried, a `SpendingLimitException` is thrown right away.
-- **Other errors (4xx):** never retried.
+- **Other errors (4xx, including 408):** never retried.
+
+**Overall time limit:** `Config::$timeout` also bounds the retries. It covers the run start, the wait for the run and all retries: no retry is started whose wait would pass it, and the timeout of each request is cut to the time left plus 5 seconds. Reading the results of a successful run always gets at least 30 seconds, so a call can take somewhat longer than `timeout`. If polling fails because this time is used up (a skipped retry, or a request that outlived it), the client aborts the run (best effort) and the error of that last request is thrown.
 
 ```php
 $client = (new Client(new Config(maxRetries: 5, retryBaseDelay: 2.0, retryMaxDelay: 60.0)))->setApifyKey($apiToken);

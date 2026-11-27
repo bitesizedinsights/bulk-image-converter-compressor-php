@@ -9,7 +9,7 @@ use InvalidArgumentException;
 final readonly class Config
 {
     /**
-     * @param  int  $timeout  Maximum seconds to wait for a run to finish.
+     * @param  int  $timeout  Maximum seconds to wait for a run to finish. Covers the run start, polling and retries.
      * @param  int  $requestTimeout  Timeout in seconds of a single HTTP request.
      * @param  int  $maxRetries  How often a failed request is repeated (0 turns retrying off). Rate limits (429), server
      *                           errors (5xx) and connection failures are retried; see the README for the exact rules.
