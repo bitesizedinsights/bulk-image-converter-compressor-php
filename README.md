@@ -76,7 +76,7 @@ Free-plan users get 5 runs in total; each free run converts the first 3 images (
 
 ## How to Convert Images in PHP
 
-`Client::convert()` starts one Actor run for all images, waits for it and returns one `ConvertedImage` per processed image, URLs first, then uploaded files. Fewer rows than inputs are returned on the free plan (first 3 images), with duplicate inputs, at the spending limit or after a shutdown; use `Results::missingIndexes()` and `Results::unprocessed()` to find the images without a row, see [Images without a result](#images-without-a-result).
+`Client::convert()` starts one Actor run for up to 1000 images (for more, see [`convertMany()`](#convert-more-than-1000-images-in-batches)), waits for it and returns one `ConvertedImage` per processed image, in the order the Actor finished them; `index` gives the input position (URLs first, then uploaded files). Fewer rows than inputs are returned on the free plan (first 3 images), with duplicate inputs, at the spending limit or after a shutdown; use `Results::missingIndexes()` and `Results::unprocessed()` to find the images without a row, see [Images without a result](#images-without-a-result).
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -91,7 +91,7 @@ Free-plan users get 5 runs in total; each free run converts the first 3 images (
 | `uploadKeys` | `list<string>` | `[]` | Keys of files you uploaded to a key-value store |
 | `uploadStoreName` | `?string` | `null` | Store holding the uploaded files; `null` = the run's default store |
 
-At least one URL or upload key is required, up to 1000 images per run. URLs may be at most 2048 characters, upload keys 256 and `uploadStoreName` 63. Arguments outside these limits throw `InvalidArgumentException` before any request is made. Options left at `null` are not sent, so the Actor defaults apply.
+At least one URL or upload key is required, up to 1000 images per run (URLs and upload keys together). A run of 1000 may not finish within the default timeout, see [Large Batches and Timeouts](#large-batches-and-timeouts). URLs may be at most 2048 characters, upload keys 256 and `uploadStoreName` 63. Arguments outside these limits throw `InvalidArgumentException` before any request is made. Options left at `null` are not sent, so the Actor defaults apply.
 
 <details>
 <summary>ConvertedImage fields</summary>
@@ -141,6 +141,63 @@ Pass a deduplicated count to `missingIndexes()` and `isComplete()`; `Results::in
 $json = json_encode($image);                                  // database column, cache, queue payload
 $restored = ConvertedImage::fromArray(json_decode($json, true)); // same data again
 ```
+
+## Convert More Than 1000 Images in Batches
+
+`Client::convertMany()` takes any number of URLs and upload keys, splits them into batches of at most `$batchSize` images (1 to 1000, default 1000, URLs and upload keys counted together) and converts them one batch after another. **Every batch is a separate Actor run and is billed on its own** (its own start fee, and on the free plan one of your free runs). An Apify spending limit that applies per run does not cap the call as a whole.
+
+```php
+use ImageConverter\Client;
+use ImageConverter\Config;
+use ImageConverter\Exception\BatchException;
+use ImageConverter\Results;
+
+$client = (new Client(new Config(timeout: 1800)))->setApifyKey($apiToken);
+
+try {
+    $images = $client->convertMany($urls, uploadKeys: $uploadKeys, uploadStoreName: 'my-photos', batchSize: 250);
+    $missing = Results::unprocessed($images, $urls, $uploadKeys); // both lists empty when everything got a row
+} catch (BatchException $e) {
+    save($e->results);      // images of the batches completed before the failure: paid for, keep them
+    $e->batch;              // number of the failed batch (from 1), of $e->batchCount
+    $e->runId;              // its run, when known: look at it before converting its inputs again
+    $e->failed;             // ['urls' => [...], 'uploadKeys' => [...]] of the failed batch
+    $e->pending;            // same shape, batches that were never started: safe to convert
+    $e->getPrevious();      // the cause, e.g. SpendingLimitException, RateLimitException or ApiException
+}
+```
+
+It takes the same parameters as `convert()`, plus `batchSize`, sends the same options to every batch and returns one list of `ConvertedImage`.
+
+- **Duplicates:** the whole input is deduplicated before it is split, the way a single run does it (control characters and surrounding whitespace stripped, a scheme-less URL gets `https://`, empty values dropped, the first occurrence wins; URLs and upload keys are separate lists), so a repeated image is not converted and billed in two batches.
+- **`index`:** each run counts from 1; `convertMany()` rewrites it to the 1-based position in the deduplicated list of your **whole** input (URLs first, then upload keys). Without duplicates or blank entries that is the position in your arrays. `Results::missingIndexes($images, Results::inputCount($urls, $uploadKeys))` works on the whole input.
+- **Files:** every run has its own default key-value store. Download with `outputUrl`. `outputKey` is not rewritten: its leading number counts within the batch (it does not match the new `index`), and two batches can produce the same key in different stores.
+- **Uploads:** pass `uploadStoreName`. Without it every batch looks for the upload keys in its own run's default store.
+- **Order:** batch by batch; within a batch in the order the Actor finished the images. Use `index` to sort or match.
+- **Validation:** all inputs and options are checked before the first run starts. An invalid argument, including a `batchSize` outside 1 to 1000, throws `InvalidArgumentException` and nothing is billed. Checks that only the Actor makes (for example a URL that is not http or https) fail the run of their batch.
+- **Empty input:** no images, or only blank entries, returns `[]` without a request.
+- **Missing rows stop the call:** when a batch returns fewer rows than it has images (free plan cap of 3 images, spending limit, shutdown), no further batch is started and the results so far are returned without an exception. Always check `Results::unprocessed()`. A failed image, also with a `time_limit` error, is a row and does not stop the call.
+- **Failures:** any error in a batch, in the first one too, ends the call with a `BatchException` (it extends `ApiException`). Only `MissingApiKeyException` before the first run is thrown as it is. A `catch (SpendingLimitException)` or `catch (RateLimitException)` does not catch it: look at `getPrevious()`.
+- **No repeats:** a batch is never run again. Retries happen only for single requests, under the rules in [Retries and Backoff](#retries-and-backoff).
+- **After a failure:** `failed` and `pending` keep your original array keys. The run of the failed batch may have converted, and billed, some images, and after an error while polling or reading the results it may still be working or have finished completely. Before you convert `failed` again, look at that run: `$client->wait($e->runId)` followed by `$client->results($e->runId)` reads it without starting a new run (see [Start Now, Collect Later](#start-now-collect-later-run-ids)). Their `index` counts within that batch, so match those rows by `source`. `results()` reads successful runs only; for a failed or aborted run check its dataset in the Apify Console. `runId` is `null` when it is not known, for example after a timeout of the run-start request, which does not prove that no run was started. A further `convertMany()` call with the rest numbers `index` within that call's input.
+
+Results are held in memory until the call returns. A process that is killed (for example by PHP's `max_execution_time`) loses them, so run long conversions from the command line or a queue worker, or call `convertMany()` with slices of your input and store each result (`index` then counts within the slice).
+
+## Large Batches and Timeouts
+
+**1000 images may not finish within the default `Config::$timeout` of 600 seconds.** This applies to `convert()` and to each batch of `convertMany()`. How long a run takes depends on the number, size and format of the images (large files and AVIF output are the slowest). When the time is not enough, one of two things happens:
+
+- the run finishes in time and the images it could not start come back as `failed` rows with a `time_limit: ...` error (not billed for the conversion); convert those again in another call, or
+- the client's wait expires first: it aborts the run and throws an `ApiException` (in `convertMany()` wrapped in a `BatchException`). Images converted before the abort may be billed and are in the run's dataset, which this call does not return; `$e->runId` identifies the run.
+
+To avoid this, raise `timeout`, which is also sent as the run timeout unless you set `runTimeout`, or make the batches smaller:
+
+```php
+$client = (new Client(new Config(timeout: 1800)))->setApifyKey($apiToken);
+$images = $client->convertMany($urls, batchSize: 250);
+```
+
+The timeout applies per batch, so a `convertMany()` call can take up to the number of batches times `timeout`, plus the time to read the results.
 
 ## Convert HEIC and Uploaded Photos to JPEG in PHP
 
@@ -237,6 +294,7 @@ $client = new Client(onRetry: static fn (\ImageConverter\DTO\RetryEvent $event) 
 ## Error Handling for PHP Image Conversion
 
 - `InvalidArgumentException`: a malformed run ID, a negative `wait()` timeout, no images, more than 1000, a URL over 2048 characters, an upload key over 256, a store name over 63, quality outside 1 to 100, sizes outside 0 to 16000 or an invalid color.
+- `BatchException` (extends `ApiException`): thrown by `convertMany()` only, when a batch fails; it keeps the results of the earlier batches, see [Convert More Than 1000 Images](#convert-more-than-1000-images-in-batches).
 - `MissingApiKeyException` (extends `ApiException`): no key via `setApifyKey()` and neither `APIFY_API_TOKEN` nor `APIFY_TOKEN` is set.
 - `RateLimitException` (extends `ApiException`): HTTP 429; `$e->retryAfter` holds the advised seconds.
 - `SpendingLimitException` (extends `ApiException`): HTTP 402, the Apify account reached its monthly usage or spending limit; the code is 402 and `$e->errorType` holds Apify's error `type` (null when the body is unreadable). Never retried. Catch it before `ApiException`: `try { $client->convert($urls); } catch (SpendingLimitException $e) { /* raise the limit or wait */ } catch (ApiException $e) { /* other failures */ }`.
@@ -275,7 +333,7 @@ Input: JPEG, PNG, WebP, AVIF, GIF, TIFF, BMP and HEIC/HEIF. Output: JPEG, PNG, W
 
 ### What are the size limits?
 
-Up to 25 MB and 50 megapixels per source image and up to 1000 images per run. Larger images come back as failed rows.
+Up to 25 MB and 50 megapixels per source image and up to 1000 images per run (`convertMany()` takes more and starts one run per 1000). Larger images come back as failed rows.
 
 ### Why is a converted file sometimes bigger?
 

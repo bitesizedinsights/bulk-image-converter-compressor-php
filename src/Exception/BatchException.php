@@ -13,9 +13,10 @@ use Throwable;
  * `$statusMessage` come from the failed batch. No further batch is started and nothing is repeated.
  *
  * `$failed` holds the inputs of the failed batch. Its run may have been started, and may have converted (and billed)
- * some of them: check the run before converting them again. `$pending` holds the inputs of the batches that were
- * never started. Both keep the original array keys. A null `$runId` means unknown, which does not prove that no run
- * was started (for example after a timeout of the run-start request).
+ * some of them, or still be working: look at it (`Client::wait()` and `results()`, or the Apify Console) before
+ * converting them again. `$pending` holds the inputs of the batches that were never started. Both keep the original
+ * array keys. A null `$runId` means unknown, which does not prove that no run was started (for example after a
+ * timeout of the run-start request).
  *
  * @phpstan-type Inputs array{urls: array<int|string, string>, uploadKeys: array<int|string, string>}
  */
