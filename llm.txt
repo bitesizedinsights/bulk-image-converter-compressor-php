@@ -50,6 +50,8 @@ Key facts:
   - `ImageConverter\Exception\RateLimitException` (extends ApiException): HTTP 429, property retryAfter (seconds)
   - `ImageConverter\Exception\SpendingLimitException` (extends ApiException, final): HTTP 402 (monthly usage or spending limit reached), code 402, property errorType (Apify error type, null if unreadable), never retried; catch it before ApiException
 - Single bad images do not throw; they are returned with status Failed and an error message.
+- Invalid inputs: the Actor strips control and invisible characters and surrounding whitespace, skips blank entries and prepends https:// to URLs without http(s)://. One bad URL fails the whole run before any conversion (other scheme, no host or unparseable, port 0, credentials, literal local or private host, over 2048 characters after the prefix): ApiException 'Actor run ended with status FAILED: Invalid input: ...' (BatchException in convertMany()). An unopenable upload store fails the run too; download, DNS/redirect and file problems are failed rows
+- Output links: outputUrl is a record URL in the run's default (unnamed) key-value store. Under 'Restricted' general resource access the plain URL needs a token with access (download()/save() send it); a signed URL or 'Anyone with ID can read' needs none, so treat URLs as secrets; whether the Actor's URLs are signed is not verified. Retention: Apify's docs name 7 days for unnamed key-value stores, and elsewhere plan-dependent periods; download soon after the run
 
 ## Limits
 - Free Apify plan: 5 runs in total, each converting the first 3 images (URLs plus upload keys); Console test runs have the same cap

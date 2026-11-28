@@ -104,7 +104,7 @@ At least one URL or upload key is required, up to 1000 images per run (URLs and 
 | `source` | `string` | The image URL or the upload key |
 | `sourceType` | `SourceType` | `Url` or `Upload` |
 | `status` | `ConversionStatus` | `Success` or `Failed` |
-| `outputUrl` | `?string` | Public link to the converted file |
+| `outputUrl` | `?string` | Record URL of the converted file, see [Output links](#output-links-access-and-retention) |
 | `outputKey` | `?string` | Key of the converted file in the run's key-value store |
 | `sourceFormat`, `outputFormat` | `?string` | Detected original format and new format, e.g. `png`, `webp` |
 | `sourceBytes`, `outputBytes`, `bytesSaved` | `?int` | File sizes and the difference; `bytesSaved` is negative if the new file is larger |
@@ -176,6 +176,39 @@ Both also exist on the client: `$client->save($image, $path)` and `$client->down
 - **Files:** the directory must exist. An existing file is only replaced with `overwrite: true`. The data is written to a temporary file in the same directory and moved into place when complete, so a failed download leaves no partial file and keeps the old one. `save()` takes your path as it is: never build it from untrusted values such as `source`.
 - **Limits:** files above `maxBytes` (default `Client::MAX_DOWNLOAD_BYTES`, 256 MiB) are refused, and the size must match `outputBytes` when the row has it. `Config::$timeout` (at least 30 seconds) bounds one download including retries, which follow [Retries and Backoff](#retries-and-backoff); a connection that breaks while the file is read is not retried. Downloads need PHP's `allow_url_fopen` with Guzzle's default handlers.
 - **Errors:** `InvalidArgumentException` (no `outputUrl`, for example a failed row, or an unusable or existing path), `ApiException` (refused or failed download; the code is the HTTP status), `RateLimitException` and `RuntimeException` (the file cannot be written).
+
+### Output Links: Access and Retention
+
+`outputUrl` is the API address of one record in the **run's default key-value store**, `https://api.apify.com/v2/key-value-stores/{storeId}/records/{outputKey}`. It is not a permanent image host.
+
+- **Access** depends on the [general resource access](https://docs.apify.com/account/collaboration/general-resource-access) of your account or of the store. With "Restricted", which Apify's docs name as the default, opening the plain URL needs an API token with access to the store: `download()` and `save()` send yours, a browser or an `<img>` tag sends none. With "Anyone with ID can read", everyone who has the URL can fetch the file.
+- **Signed URLs:** a URL with a `signature` query parameter works without a token, and Apify says a signed record URL stays valid as long as the record exists. The Actor asks Apify's SDK for a public URL, which is signed only when the run can read the store's signing key. Whether your `outputUrl` values carry a signature has not been verified with a live run.
+- **Treat the URLs as secrets:** depending on the above, a URL alone may be enough to read the image, so be careful with logs and shared databases. Never put your API token into a URL.
+- **Retention:** the run's store is unnamed, so Apify deletes it. Apify's [key-value store docs](https://docs.apify.com/storage/key-value-store) say unnamed stores expire after 7 days unless specified otherwise. Its [storage docs](https://docs.apify.com/storage#data-retention) say the retention depends on your plan (Free: the 10 most recent runs are kept for 4 months; paid plans: the period set in the billing settings) and only named storages are kept indefinitely. Do not rely on the longer periods: download the files soon after the run and serve them from your own storage. A deleted file cannot be downloaded any more.
+
+### Invalid Inputs
+
+Before a run starts, the library only checks counts, lengths and option values. The Actor then cleans each URL and upload key: control and invisible characters and surrounding whitespace are removed and blank entries are skipped. A URL that does not start with `http://` or `https://` gets `https://` in front, and the row's `source` shows that completed URL.
+
+**One bad URL fails the whole run before any image is converted**, including all the good ones:
+
+- another scheme, such as `ftp://` or `file://`
+- no host, or a URL that cannot be parsed (for example an invalid port), or port 0
+- a user name or password in the URL
+- a host that literally names a local or private address, such as `localhost` or `127.0.0.1`
+- more than 2048 characters once `https://` has been added (the library checks the length you pass in)
+
+`convert()` and `wait()` then throw an `ApiException` such as `Actor run ended with status FAILED: Invalid input: Invalid URL: 'ftp://example.com/a.png'`; `$e->statusMessage` holds the Actor's reason. Fix or remove the entry and run again. With `convertMany()` the entry fails only its own batch: earlier batches have run and are billed, and the `BatchException` holds their results. The whole run also fails when the key-value store with the uploaded files cannot be opened.
+
+Problems found only while processing do not fail the run, they give a `failed` row: a host name or redirect that leads to a private address, a failed download, a file that is not a readable image or is too large, or an upload key without a usable record.
+
+```php
+try {
+    $images = $client->convert($urls);
+} catch (ApiException $e) {
+    error_log($e->statusMessage ?? $e->getMessage()); // e.g. "Invalid input: Invalid URL: ..."
+}
+```
 
 ### Images without a result
 
@@ -376,7 +409,7 @@ $client = new Client(onRetry: static fn (\ImageConverter\DTO\RetryEvent $event) 
 - `RateLimitException` (extends `ApiException`): HTTP 429; `$e->retryAfter` holds the advised seconds.
 - `SpendingLimitException` (extends `ApiException`): HTTP 402, the Apify account reached its monthly usage or spending limit; the code is 402 and `$e->errorType` holds Apify's error `type` (null when the body is unreadable). Never retried. Catch it before `ApiException`: `try { $client->convert($urls); } catch (SpendingLimitException $e) { /* raise the limit or wait */ } catch (ApiException $e) { /* other failures */ }`.
 - `ApiException`: failed requests, malformed responses, a failed, aborted or timed-out run, a run that does not finish within `timeout` (it is aborted, `$e->runId` holds its ID), or a dataset item that cannot be mapped (the message names its index). For a failed, aborted or timed-out run the message is `Actor run ended with status X: <reason>` when the run reports a status message (single line, at most 500 characters); `$e->statusMessage` holds the raw reason (at most 2000 characters, null when absent) and `$e->runId` the run ID, so you can look the run up or log it: `catch (ApiException $e) { error_log("{$e->runId}: {$e->statusMessage}"); }`.
-- Single bad images never throw: they come back as `failed` rows.
+- Single bad images never throw: they come back as `failed` rows. A malformed or disallowed URL is different: it fails the whole run, see [Invalid Inputs](#invalid-inputs).
 
 ## PHP Image Converter Examples
 
