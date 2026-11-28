@@ -114,6 +114,18 @@ Helpers: `isSuccessful()`, `isFailed()`, `isLarger()` (new file is bigger than t
 
 </details>
 
+### Filter Results
+
+```php
+use ImageConverter\Results;
+
+$converted = Results::successful($images); // list<ConvertedImage>
+$errors = Results::failed($images);        // list<ConvertedImage>, see each row's error
+$rows = Results::byUrl($images, 'www.python.org/static/img/python-logo.png'); // list, usually 0 or 1 row
+```
+
+All three keep the order and return a new list. `byUrl()` normalizes both URLs like the Actor (control characters and surrounding whitespace stripped, a URL without `http://` or `https://` gets `https://`) and then compares them exactly: `http` and `https`, letter case, trailing slashes, percent-encoding and query order all matter. It never matches uploaded files. An image without a row is neither successful nor failed, see [Images without a result](#images-without-a-result).
+
 ### Totals and Readable Sizes
 
 ```php

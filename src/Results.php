@@ -9,8 +9,8 @@ use ImageConverter\DTO\ConvertedImage;
 use ImageConverter\Support\Inputs;
 
 /**
- * Helpers for the list returned by `Client::convert()`: find images without a result row, count and add up results and
- * format byte sizes.
+ * Helpers for the list returned by `Client::convert()`: find images without a result row, filter, count and add up
+ * results and format byte sizes.
  *
  * `convert()` returns one row per processed image. Fewer rows come back on the free plan (first 3 images), when
  * duplicates collapse, at the spending limit or after a shutdown. `ConvertedImage::$index` is 1-based and refers to
@@ -92,13 +92,53 @@ final class Results
     }
 
     /**
+     * The successfully converted rows, in their order.
+     *
+     * @param  list<ConvertedImage>  $results
+     * @return list<ConvertedImage>
+     */
+    public static function successful(array $results): array
+    {
+        return self::where($results, static fn (ConvertedImage $image): bool => $image->isSuccessful());
+    }
+
+    /**
+     * The failed rows, in their order. Images without any row are not here, see `unprocessed()`.
+     *
+     * @param  list<ConvertedImage>  $results
+     * @return list<ConvertedImage>
+     */
+    public static function failed(array $results): array
+    {
+        return self::where($results, static fn (ConvertedImage $image): bool => $image->isFailed());
+    }
+
+    /**
+     * The rows of an image URL, successful or not. Both sides are normalized the way the Actor does it (control
+     * characters and surrounding whitespace stripped, a URL without `http://` or `https://` gets `https://`) and then
+     * compared exactly: case, trailing slashes, percent-encoding and query order matter. Rows of uploaded files never
+     * match. One run has at most one row per URL; lists merged from several calls can hold more.
+     *
+     * @param  list<ConvertedImage>  $results
+     * @return list<ConvertedImage>
+     */
+    public static function byUrl(array $results, string $url): array
+    {
+        $wanted = Inputs::normalize($url, true);
+
+        return self::where($results, static fn (ConvertedImage $image): bool => $wanted !== ''
+            && $image->sourceType === SourceType::Url
+            && Inputs::normalize($image->source, true) === $wanted);
+    }
+
+    /**
      * Number of successfully converted images.
      *
      * @param  list<ConvertedImage>  $results
      */
     public static function successCount(array $results): int
     {
-        return count(array_filter($results, static fn (ConvertedImage $image): bool => $image->isSuccessful()));
+        return count(self::successful($results));
     }
 
     /**
@@ -155,6 +195,16 @@ final class Results
         }
 
         return sprintf('%.1F %s', $value, $unit);
+    }
+
+    /**
+     * @param  list<ConvertedImage>  $results
+     * @param  Closure(ConvertedImage): bool  $keep
+     * @return list<ConvertedImage>
+     */
+    private static function where(array $results, Closure $keep): array
+    {
+        return array_values(array_filter($results, $keep));
     }
 
     /**

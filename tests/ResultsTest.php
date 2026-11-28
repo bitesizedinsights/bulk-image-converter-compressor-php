@@ -127,3 +127,50 @@ test('bytes are formatted in steps of 1024 with their sign', function (int $byte
     [1099511627776, '1.0 TB'],
     [PHP_INT_MIN, '-8388608.0 TB'],
 ]);
+
+test('successful and failed rows are filtered in order as a list', function (): void {
+    $results = [
+        sized('failed', null, null, null),
+        sized('success', 2, 1, 1),
+        sized('failed', null, null, null),
+        sized('success', 3, 1, 2),
+    ];
+
+    expect(Results::successful($results))->toBe([$results[1], $results[3]])
+        ->and(Results::failed($results))->toBe([$results[0], $results[2]])
+        ->and(Results::successful([]))->toBe([])
+        ->and(Results::failed([]))->toBe([]);
+});
+
+test('rows are found by URL with the normalization of the Actor', function (string $url): void {
+    $results = rows([1 => 'https://a.test/1.png', 2 => 'https://a.test/2.png', 3 => 'a.test/1.png']);
+
+    expect(Results::byUrl([$results[0], $results[1]], $url))->toBe([$results[0]]);
+})->with([
+    'exact' => 'https://a.test/1.png',
+    'no scheme' => 'a.test/1.png',
+    'whitespace' => "  https://a.test/1.png \n",
+    'control and invisible characters' => "https://a.test/\x001.p\u{200b}ng",
+    'unicode space' => "\u{00a0}a.test/1.png",
+]);
+
+test('URLs that the Actor treats as different do not match', function (string $url): void {
+    expect(Results::byUrl(rows([1 => 'https://a.test/1.png']), $url))->toBe([]);
+})->with([
+    'other scheme' => 'http://a.test/1.png',
+    'path case' => 'https://a.test/1.PNG',
+    'host case' => 'https://A.test/1.png',
+    'trailing slash' => 'https://a.test/1.png/',
+    'query' => 'https://a.test/1.png?x=1',
+    'empty' => '',
+    'blank' => '   ',
+]);
+
+test('uploaded files never match a URL and failed or repeated rows do', function (): void {
+    $upload = ConvertedImage::fromArray(
+        ['source' => 'https://a.test/1.png', 'sourceType' => 'upload'] + loadFixture('image_success'),
+    );
+    $failed = ConvertedImage::fromArray(['source' => 'https://a.test/1.png'] + loadFixture('image_failed'));
+
+    expect(Results::byUrl([$upload, $failed, $failed], 'a.test/1.png'))->toBe([$failed, $failed]);
+});
