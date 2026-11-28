@@ -114,6 +114,23 @@ Helpers: `isSuccessful()`, `isFailed()`, `isLarger()` (new file is bigger than t
 
 </details>
 
+### Totals and Readable Sizes
+
+```php
+use ImageConverter\Results;
+
+printf(
+    "%d of %d converted, %s saved (%s -> %s)\n",
+    Results::successCount($images),
+    count($images),
+    Results::formatBytes(Results::totalBytesSaved($images)), // e.g. "9.4 KB", or "-1.5 MB" when the files grew
+    Results::formatBytes(Results::totalSourceBytes($images)),
+    Results::formatBytes(Results::totalOutputBytes($images)),
+);
+```
+
+`totalSourceBytes()`, `totalOutputBytes()` and `totalBytesSaved()` add up successful rows only; an unknown size counts as 0. `totalBytesSaved()` is negative when the new files are larger in total. `formatBytes()` uses steps of 1024 (`B`, `KB`, `MB`, `GB`, `TB`) with one decimal from `KB` on and keeps the sign.
+
 ### Download Converted Images
 
 `save()` streams the converted file of a result to disk, `download()` returns it as a string:

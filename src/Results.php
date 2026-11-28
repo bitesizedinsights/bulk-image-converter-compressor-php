@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace ImageConverter;
 
+use Closure;
 use ImageConverter\DTO\ConvertedImage;
 use ImageConverter\Support\Inputs;
 
 /**
- * Helpers to find images that got no result row in the list returned by `Client::convert()`.
+ * Helpers for the list returned by `Client::convert()`: find images without a result row, count and add up results and
+ * format byte sizes.
  *
  * `convert()` returns one row per processed image. Fewer rows come back on the free plan (first 3 images), when
  * duplicates collapse, at the spending limit or after a shutdown. `ConvertedImage::$index` is 1-based and refers to
@@ -87,6 +89,89 @@ final class Results
             'urls' => self::pending($urls, true, $done[SourceType::Url->value]),
             'uploadKeys' => self::pending($uploadKeys, false, $done[SourceType::Upload->value]),
         ];
+    }
+
+    /**
+     * Number of successfully converted images.
+     *
+     * @param  list<ConvertedImage>  $results
+     */
+    public static function successCount(array $results): int
+    {
+        return count(array_filter($results, static fn (ConvertedImage $image): bool => $image->isSuccessful()));
+    }
+
+    /**
+     * Original size in bytes of all successfully converted images; unknown sizes count as 0.
+     *
+     * @param  list<ConvertedImage>  $results
+     */
+    public static function totalSourceBytes(array $results): int
+    {
+        return self::sum($results, static fn (ConvertedImage $image): ?int => $image->sourceBytes);
+    }
+
+    /**
+     * New size in bytes of all successfully converted images; unknown sizes count as 0.
+     *
+     * @param  list<ConvertedImage>  $results
+     */
+    public static function totalOutputBytes(array $results): int
+    {
+        return self::sum($results, static fn (ConvertedImage $image): ?int => $image->outputBytes);
+    }
+
+    /**
+     * Bytes saved over all successfully converted images; negative when the new files are larger in total.
+     *
+     * @param  list<ConvertedImage>  $results
+     */
+    public static function totalBytesSaved(array $results): int
+    {
+        return self::sum($results, static fn (ConvertedImage $image): ?int => $image->bytesSaved);
+    }
+
+    /**
+     * A byte count for people, in steps of 1024 as in the Actor's status message: `812 B`, `9.4 KB`, `-1.5 MB`,
+     * `2.0 GB`. A negative value, such as the savings of a file that grew, keeps its sign.
+     */
+    public static function formatBytes(int $bytes): string
+    {
+        if ($bytes > -1024 && $bytes < 1024) {
+            return "{$bytes} B";
+        }
+
+        $value = $bytes / 1024;
+        $unit = 'KB';
+
+        foreach (['MB', 'GB', 'TB'] as $next) {
+            // Judged after rounding, so 1048575 bytes read as 1.0 MB and not as 1024.0 KB.
+            if (abs(round($value, 1)) < 1024) {
+                break;
+            }
+
+            $value /= 1024;
+            $unit = $next;
+        }
+
+        return sprintf('%.1F %s', $value, $unit);
+    }
+
+    /**
+     * @param  list<ConvertedImage>  $results
+     * @param  Closure(ConvertedImage): ?int  $bytes
+     */
+    private static function sum(array $results, Closure $bytes): int
+    {
+        $total = 0;
+
+        foreach ($results as $image) {
+            if ($image->isSuccessful()) {
+                $total += $bytes($image) ?? 0;
+            }
+        }
+
+        return $total;
     }
 
     /**
