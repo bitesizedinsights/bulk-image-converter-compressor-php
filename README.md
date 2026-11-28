@@ -89,9 +89,11 @@ Free-plan users get 5 runs in total; each free run converts the first 3 images (
 | `stripMetadata` | `?bool` | `null` | Remove camera data and GPS, convert to sRGB (Actor default: on) |
 | `backgroundColor` | `?string` | `null` | Hex color like `#ffffff` that fills transparency for JPEG and BMP |
 | `uploadKeys` | `list<string>` | `[]` | Keys of files you uploaded to a key-value store |
-| `uploadStoreName` | `?string` | `null` | Store holding the uploaded files; `null` = the run's default store |
+| `uploadStoreName` | `?string` | `null` | Older option: store holding the uploaded files, by name; `null` = the run's default store |
+| `runTimeout` | `?int` | `null` | Apify run time limit in seconds, see [Run timeout](#run-timeout) |
+| `uploadStore` | `?string` | `null` | ID of the store holding the uploaded files, see [uploads](#convert-heic-and-uploaded-photos-to-jpeg-in-php) |
 
-At least one URL or upload key is required, up to 1000 images per run (URLs and upload keys together). A run of 1000 may not finish within the default timeout, see [Large Batches and Timeouts](#large-batches-and-timeouts). URLs may be at most 2048 characters, upload keys 256 and `uploadStoreName` 63. Arguments outside these limits throw `InvalidArgumentException` before any request is made. Options left at `null` are not sent, so the Actor defaults apply.
+At least one URL or upload key is required, up to 1000 images per run (URLs and upload keys together). A run of 1000 may not finish within the default timeout, see [Large Batches and Timeouts](#large-batches-and-timeouts). URLs may be at most 2048 characters, upload keys 256, `uploadStoreName` 63 and `uploadStore` 200. Arguments outside these limits throw `InvalidArgumentException` before any request is made. Options left at `null` are not sent, so the Actor defaults apply.
 
 <details>
 <summary>ConvertedImage fields</summary>
@@ -216,7 +218,7 @@ use ImageConverter\Results;
 $client = (new Client(new Config(timeout: 1800)))->setApifyKey($apiToken);
 
 try {
-    $images = $client->convertMany($urls, uploadKeys: $uploadKeys, uploadStoreName: 'my-photos', batchSize: 250);
+    $images = $client->convertMany($urls, uploadKeys: $uploadKeys, uploadStore: $storeId, batchSize: 250);
     $missing = Results::unprocessed($images, $urls, $uploadKeys); // both lists empty when everything got a row
 } catch (BatchException $e) {
     save($e->results);      // images of the batches completed before the failure: paid for, keep them
@@ -233,7 +235,7 @@ It takes the same parameters as `convert()`, plus `batchSize`, sends the same op
 - **Duplicates:** the whole input is deduplicated before it is split, the way a single run does it (control characters and surrounding whitespace stripped, a scheme-less URL gets `https://`, empty values dropped, the first occurrence wins; URLs and upload keys are separate lists), so a repeated image is not converted and billed in two batches.
 - **`index`:** each run counts from 1; `convertMany()` rewrites it to the 1-based position in the deduplicated list of your **whole** input (URLs first, then upload keys). Without duplicates or blank entries that is the position in your arrays. `Results::missingIndexes($images, Results::inputCount($urls, $uploadKeys))` works on the whole input.
 - **Files:** every run has its own default key-value store. Download with `outputUrl`. `outputKey` is not rewritten: its leading number counts within the batch (it does not match the new `index`), and two batches can produce the same key in different stores.
-- **Uploads:** pass `uploadStoreName`. Without it every batch looks for the upload keys in its own run's default store.
+- **Uploads:** pass `uploadStore` (the store ID, see [uploads](#convert-heic-and-uploaded-photos-to-jpeg-in-php); sent with the batches that hold upload keys) or the older `uploadStoreName`. Without either, every batch looks for the upload keys in its own run's default store.
 - **Order:** batch by batch; within a batch in the order the Actor finished the images. Use `index` to sort or match.
 - **Validation:** all inputs and options are checked before the first run starts. An invalid argument, including a `batchSize` outside 1 to 1000, throws `InvalidArgumentException` and nothing is billed. Checks that only the Actor makes (for example a URL that is not http or https) fail the run of their batch.
 - **Empty input:** no images, or only blank entries, returns `[]` without a request.
@@ -262,15 +264,29 @@ The timeout applies per batch, so a `convertMany()` call can take up to the numb
 
 ## Convert HEIC and Uploaded Photos to JPEG in PHP
 
-Upload files to an Apify key-value store and pass their record keys. Read formats include HEIC and HEIF from iPhones.
+Local files go into an Apify key-value store first, then the Actor reads them by record key. Read formats include HEIC and HEIF from iPhones.
 
 ```php
+use ImageConverter\OutputFormat;
+
+$store = $client->getOrCreateStore('my-photos');                       // the store ID
+$key = $client->uploadFile(__DIR__.'/photos/holiday-01.heic', $store); // "holiday-01.heic"
+
 $images = $client->convert(
     outputFormat: OutputFormat::Jpeg,
-    uploadKeys: ['holiday-01.heic'],
-    uploadStoreName: 'my-photos',
+    uploadKeys: [$key],
+    uploadStore: $store,
 );
 ```
+
+- **`uploadStore` and `uploadStoreName`:** `uploadStore` takes the store ID and is the Actor input that gives a run read access to that one store (the Actor's store picker). `uploadStoreName` is the older by-name input; a name alone does not grant a run with limited permissions access to the store. `uploadStore` wins when both are set, needs `uploadKeys` and may be at most 200 characters. `convertMany()` takes it too. The access grant and `uploadStore` itself have not been verified by this library with a live run.
+- **Store:** `getOrCreateStore($name)` returns your store with that name and creates it only when there is none, so it may already hold files. Names are 1 to 63 letters, digits and hyphens (no hyphen at either end). You can also use a store made in the Console: `uploadFile()` takes its ID or `username~store-name`. A run's own default store does not exist before the run, so it cannot hold your uploads.
+- **File:** a local file of 1 byte to 25 MB (the Actor's limit per image; larger files are refused before any request). The content is not inspected: a file that is not an image becomes a failed row.
+- **Key:** by default the file name, with every character outside `a-zA-Z0-9!-_.'()` replaced by `-` and cut to 256 characters, so different names such as `a b.png` and `a-b.png` give the same key. Pass `key:` to choose your own.
+- **Content type:** taken from the extension (`jpg`, `jpeg`, `png`, `webp`, `avif`, `gif`, `tif`, `tiff`, `bmp`, `heic`, `heif`), else `application/octet-stream`. `contentType:` accepts that or an image type without `+xml`; the Actor cannot read text, JSON or XML records as files.
+- **No surprise overwrites:** a taken key throws an `ApiException` with code 409 unless you pass `overwrite: true`. The check is a separate request right before the upload, so two uploads to one key at the same moment are not protected: use unique keys (for example `key: bin2hex(random_bytes(8)).'.heic'`) for concurrent uploads.
+- **Security:** the upload and store requests never follow redirects, so the token only goes to `Config::$baseUrl`.
+- **Cleanup:** Apify keeps named stores until you delete them, so your originals (which may hold GPS data) stay there and count as storage. Delete them in the Console or through the API (`DELETE /v2/key-value-stores/{storeId}/records/{key}`, or `DELETE /v2/key-value-stores/{storeId}` for the whole store) once the conversion is done. The library does not delete anything.
 
 ## Start Now, Collect Later: Run IDs
 
@@ -354,7 +370,7 @@ $client = new Client(onRetry: static fn (\ImageConverter\DTO\RetryEvent $event) 
 
 ## Error Handling for PHP Image Conversion
 
-- `InvalidArgumentException`: a malformed run ID, a negative `wait()` timeout, no images, more than 1000, a URL over 2048 characters, an upload key over 256, a store name over 63, quality outside 1 to 100, sizes outside 0 to 16000 or an invalid color.
+- `InvalidArgumentException`: a malformed run ID, a negative `wait()` timeout, no images, more than 1000, a URL over 2048 characters, an upload key over 256, a store name over 63, an empty or too long `uploadStore` or one without `uploadKeys`, a file, key, store or content type `uploadFile()` does not accept, an invalid `getOrCreateStore()` name, quality outside 1 to 100, sizes outside 0 to 16000 or an invalid color.
 - `BatchException` (extends `ApiException`): thrown by `convertMany()` only, when a batch fails; it keeps the results of the earlier batches, see [Convert More Than 1000 Images](#convert-more-than-1000-images-in-batches).
 - `MissingApiKeyException` (extends `ApiException`): no key via `setApifyKey()` and neither `APIFY_API_TOKEN` nor `APIFY_TOKEN` is set.
 - `RateLimitException` (extends `ApiException`): HTTP 429; `$e->retryAfter` holds the advised seconds.
@@ -368,7 +384,7 @@ $client = new Client(onRetry: static fn (\ImageConverter\DTO\RetryEvent $event) 
 - [`examples/02-resize-and-quality.php`](examples/02-resize-and-quality.php): maximum size and quality
 - [`examples/03-public-domain-file.php`](examples/03-public-domain-file.php): fetch a public domain image, convert it
 - [`examples/04-formats-and-transparency.php`](examples/04-formats-and-transparency.php): JPEG background color and AVIF
-- [`examples/05-uploaded-files.php`](examples/05-uploaded-files.php): convert uploaded HEIC photos
+- [`examples/05-uploaded-files.php`](examples/05-uploaded-files.php): upload HEIC photos and convert them
 - [`examples/06-error-handling.php`](examples/06-error-handling.php): rate limits and failed images
 - [`examples/07-run-handles.php`](examples/07-run-handles.php): start a run now, collect the images later
 
@@ -386,7 +402,7 @@ $0.0125 per converted image on the free plan, down to $0.0081 on Gold and higher
 
 ### What input does it accept?
 
-Public http(s) image URLs and files you uploaded to an Apify key-value store. Local files on your machine are not sent; upload them first or host them at a public URL.
+Public http(s) image URLs and files in an Apify key-value store. `convert()` does not send local files: upload them first with [`uploadFile()`](#convert-heic-and-uploaded-photos-to-jpeg-in-php) or host them at a public URL.
 
 ### Which formats can I convert from and to?
 

@@ -181,7 +181,11 @@ final readonly class Retrier
         // IDs are masked and no exception message is passed on: it holds the full URL, maybe with proxy credentials.
         $event = new RetryEvent(
             $method,
-            (string) preg_replace('~^/(acts|actor-runs|datasets)/[^/?]+~', '/$1/{id}', $path),
+            (string) preg_replace(
+                ['~^/(acts|actor-runs|datasets|key-value-stores)/[^/?]+~', '~/records/[^/?]+~'],
+                ['/$1/{id}', '/records/{key}'],
+                $path,
+            ),
             $retry,
             $maxRetries,
             $delay,

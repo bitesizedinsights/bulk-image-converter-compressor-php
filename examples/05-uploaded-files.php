@@ -11,15 +11,27 @@ $apiToken = getenv('APIFY_API_TOKEN') ?: getenv('APIFY_TOKEN') ?: 'your_apify_ap
 
 $client = (new Client)->setApifyKey($apiToken);
 
-// Files you uploaded to a key-value store, for example iPhone photos in HEIC format
+// Upload local files, for example iPhone photos in HEIC format, into your own key-value store
+$store = $client->getOrCreateStore('my-photos');
+$keys = [];
+
+foreach (glob(__DIR__.'/photos/*.heic') ?: [] as $path) {
+    $keys[] = $client->uploadFile($path, $store, overwrite: true);
+}
+
+if ($keys === []) {
+    exit("Put some .heic files into examples/photos first.\n");
+}
+
 $images = $client->convert(
     outputFormat: OutputFormat::Jpeg,
     quality: 85,
     maxWidth: 2000,
-    uploadKeys: ['holiday-01.heic', 'holiday-02.heic'],
-    uploadStoreName: 'my-photos',
+    uploadKeys: $keys,
+    uploadStore: $store,
 );
 
+// The uploads stay in the store until you delete them in the Apify Console or through the API.
 foreach ($images as $image) {
     echo $image->isSuccessful()
         ? "{$image->source}: {$image->outputUrl}\n"

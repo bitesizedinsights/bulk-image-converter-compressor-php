@@ -21,8 +21,10 @@ use ImageConverter\Support\AtomicFile;
 use ImageConverter\Support\Downloader;
 use ImageConverter\Support\Inputs;
 use ImageConverter\Support\Retrier;
+use ImageConverter\Support\UploadFile;
 use InvalidArgumentException;
 use JsonException;
+use Psr\Http\Message\ResponseInterface;
 use RuntimeException;
 use Throwable;
 
@@ -111,6 +113,9 @@ final class Client
      * @param  string|null  $backgroundColor  Hex color like `#ffffff` that fills transparency for JPEG and BMP.
      * @param  list<string>  $uploadKeys  Keys of files you uploaded to a key-value store.
      * @param  string|null  $uploadStoreName  Name of the store holding the uploaded files; null = default store.
+     * @param  string|null  $uploadStore  ID of the store holding the uploaded files. Selecting a store this way is what
+     *                                    gives the run read access to it; it needs `uploadKeys` and takes precedence
+     *                                    over `uploadStoreName`.
      * @param  int|null  $runTimeout  Apify run time limit in seconds for this call, 0 = the Actor's own limit; null =
      *                                `Config::$runTimeout`, which itself defaults to `Config::$timeout`.
      * @return list<ConvertedImage>
@@ -131,6 +136,7 @@ final class Client
         array $uploadKeys = [],
         ?string $uploadStoreName = null,
         ?int $runTimeout = null,
+        ?string $uploadStore = null,
     ): array {
         $input = $this->buildInput(
             $urls,
@@ -144,6 +150,7 @@ final class Client
             $uploadKeys,
             $uploadStoreName,
             $runTimeout,
+            $uploadStore,
         );
 
         return $this->execute($input, $runTimeout);
@@ -194,6 +201,7 @@ final class Client
         ?string $uploadStoreName = null,
         ?int $runTimeout = null,
         int $batchSize = self::MAX_IMAGES,
+        ?string $uploadStore = null,
     ): array {
         if ($batchSize < 1 || $batchSize > self::MAX_IMAGES) {
             throw new InvalidArgumentException('batchSize must be 1 to '.self::MAX_IMAGES.", got {$batchSize}");
@@ -202,6 +210,7 @@ final class Client
         $this->validateRunTimeout($runTimeout);
         $this->validateItems($urls, $uploadKeys);
         $this->validateOptions($quality, $maxWidth, $maxHeight, $backgroundColor, $uploadStoreName);
+        $this->validateUploadStore($uploadStore, $uploadKeys);
 
         // [kind, original key, original string] of every first occurrence, in the Actor's order.
         $items = [];
@@ -226,6 +235,8 @@ final class Client
                     'quality' => $quality,
                 ], [
                     'uploadStoreName' => $uploadStoreName,
+                    // The Actor fails a run that names a store without upload keys.
+                    'uploadStore' => $inputs['uploadKeys'] === [] ? null : $uploadStore,
                     'maxWidth' => $maxWidth,
                     'maxHeight' => $maxHeight,
                     'keepAspectRatio' => $keepAspectRatio,
@@ -328,6 +339,7 @@ final class Client
         array $uploadKeys = [],
         ?string $uploadStoreName = null,
         ?int $runTimeout = null,
+        ?string $uploadStore = null,
     ): Run {
         $input = $this->buildInput(
             $urls,
@@ -341,6 +353,7 @@ final class Client
             $uploadKeys,
             $uploadStoreName,
             $runTimeout,
+            $uploadStore,
         );
 
         $run = $this->parseRun($this->startRun($input, $runTimeout, microtime(true) + $this->config->timeout));
@@ -370,17 +383,20 @@ final class Client
         array $uploadKeys,
         ?string $uploadStoreName,
         ?int $runTimeout,
+        ?string $uploadStore,
     ): array {
         $this->validateRunTimeout($runTimeout);
         $this->validateCount($urls, $uploadKeys);
         $this->validateItems($urls, $uploadKeys);
         $this->validateOptions($quality, $maxWidth, $maxHeight, $backgroundColor, $uploadStoreName);
+        $this->validateUploadStore($uploadStore, $uploadKeys);
 
         return $this->input($urls, $uploadKeys, [
             'outputFormat' => $outputFormat->value,
             'quality' => $quality,
         ], [
             'uploadStoreName' => $uploadStoreName,
+            'uploadStore' => $uploadStore,
             'maxWidth' => $maxWidth,
             'maxHeight' => $maxHeight,
             'keepAspectRatio' => $keepAspectRatio,
@@ -500,6 +516,24 @@ final class Client
 
         if ($backgroundColor !== null && preg_match('/^#[0-9a-fA-F]{6}$/', $backgroundColor) !== 1) {
             throw new InvalidArgumentException('backgroundColor must be a hex color like #ffffff');
+        }
+    }
+
+    /**
+     * @param  array<mixed>  $uploadKeys
+     */
+    private function validateUploadStore(?string $uploadStore, array $uploadKeys): void
+    {
+        if ($uploadStore === null) {
+            return;
+        }
+
+        if ($uploadStore === '' || $this->length($uploadStore) > 200) {
+            throw new InvalidArgumentException('uploadStore must be 1 to 200 characters long');
+        }
+
+        if ($uploadKeys === []) {
+            throw new InvalidArgumentException('uploadStore needs the record keys to convert in uploadKeys');
         }
     }
 
@@ -747,6 +781,152 @@ final class Client
         }
 
         return $this->fetchImages($this->datasetId($current->toArray()), $deadline);
+    }
+
+    /**
+     * Get the ID of your key-value store with this name, creating it when there is none. Apify keeps named stores
+     * until you delete them. Pass the ID to `uploadFile()` and as `uploadStore` to `convert()`.
+     *
+     * @param  string  $name  1 to 63 letters, digits and hyphens, no hyphen at either end.
+     *
+     * @throws InvalidArgumentException when the name is invalid; nothing was sent
+     * @throws ApiException
+     * @throws RateLimitException
+     * @throws SpendingLimitException
+     */
+    public function getOrCreateStore(string $name): string
+    {
+        if (preg_match('/\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\z/', $name) !== 1) {
+            throw new InvalidArgumentException(
+                'A store name must be 1 to 63 letters, digits and hyphens, with no hyphen at either end'
+            );
+        }
+
+        $response = $this->storeRequest('POST', '/key-value-stores', ['query' => ['name' => $name]], $this->deadline());
+        $decoded = json_decode((string) $response->getBody(), true);
+        $data = is_array($decoded) ? ($decoded['data'] ?? null) : null;
+        $id = is_array($data) ? ($data['id'] ?? null) : null;
+
+        if (! is_string($id) || preg_match(self::RUN_ID_PATTERN, $id) !== 1) {
+            throw new ApiException('Invalid API response: missing or invalid store ID');
+        }
+
+        return $id;
+    }
+
+    /**
+     * Upload a local image into a key-value store, to convert it with `uploadKeys`. Redirects are never followed.
+     *
+     * An existing record is not replaced unless `overwrite` is true. That is checked right before the upload, which
+     * Apify cannot do in one step: of two uploads to the same key at the same moment, the later one wins. The record
+     * stays in the store until you delete it or the store's retention ends.
+     *
+     * @param  string  $path  A local file of 1 byte to 25 MB.
+     * @param  string  $store  A store ID, or `username~store-name` (`~store-name` for your own).
+     * @param  string|null  $key  Up to 256 characters of `a-zA-Z0-9!-_.'()`; null = the file name, with other
+     *                            characters replaced by `-`.
+     * @param  string|null  $contentType  `application/octet-stream` or an image type; null = from the file extension.
+     * @return string The record key, for `uploadKeys`.
+     *
+     * @throws InvalidArgumentException when the file, store, key or content type is not allowed; nothing was sent
+     * @throws ApiException when a request fails, or with code 409 when the key is taken
+     * @throws RateLimitException
+     * @throws SpendingLimitException
+     */
+    public function uploadFile(
+        string $path,
+        string $store,
+        ?string $key = null,
+        bool $overwrite = false,
+        ?string $contentType = null,
+    ): string {
+        if (preg_match('/\A(?:[A-Za-z0-9_.-]*~)?[A-Za-z0-9-]{1,64}\z/', $store) !== 1) {
+            throw new InvalidArgumentException('The store must be a store ID or username~store-name');
+        }
+
+        $content = UploadFile::content($path);
+        $key = UploadFile::key($path, $key);
+        $contentType = UploadFile::contentType($path, $contentType);
+        $record = '/key-value-stores/'.rawurlencode($store).'/records/'.rawurlencode($key);
+        $deadline = $this->deadline();
+
+        if (! $overwrite && $this->recordExists($record, $deadline)) {
+            throw new ApiException(
+                "The store already has a record with the key {$key}, pass overwrite: true or another key",
+                409,
+            );
+        }
+
+        $this->storeRequest('PUT', $record, [
+            'body' => $content,
+            'headers' => ['Content-Type' => $contentType],
+        ], $deadline);
+
+        return $key;
+    }
+
+    /** The deadline of one store operation; like reading results it always gets a minimum window. */
+    private function deadline(): float
+    {
+        return microtime(true) + max($this->config->timeout, self::RESULTS_WINDOW_SECONDS);
+    }
+
+    private function recordExists(string $record, float $deadline): bool
+    {
+        try {
+            $this->storeRequest('HEAD', $record, [], $deadline);
+        } catch (ApiException $e) {
+            if ($e->getCode() === 404) {
+                return false;
+            }
+
+            throw $e;
+        }
+
+        return true;
+    }
+
+    /**
+     * A store request: unlike `request()` it follows no redirect and does not expect JSON.
+     *
+     * @param  array{query?: array<string, string>, body?: string, headers?: array<string, string>}  $options
+     */
+    private function storeRequest(string $method, string $path, array $options, float $deadline): ResponseInterface
+    {
+        $url = rtrim($this->config->baseUrl, '/').$path;
+        $options['headers'] = ($options['headers'] ?? []) + [
+            'Authorization' => 'Bearer '.$this->resolveApiKey(),
+            'Accept' => 'application/json',
+        ];
+        $options['allow_redirects'] = false;
+
+        for ($attempt = 0; ; $attempt++) {
+            $options['timeout'] = $this->retrier->requestTimeout($this->config->requestTimeout, $deadline);
+
+            try {
+                $response = $this->http->request($method, $url, $options);
+            } catch (BadResponseException $e) {
+                if ($this->retrier->retry($e, $method, $path, $attempt, $deadline)) {
+                    continue;
+                }
+
+                $this->handleBadResponse($e);
+            } catch (GuzzleException $e) {
+                if ($this->retrier->retry($e, $method, $path, $attempt, $deadline)) {
+                    continue;
+                }
+
+                throw new ApiException('API request failed: '.$e->getMessage(), 0, $e);
+            }
+
+            $status = $response->getStatusCode();
+
+            if ($status < 200 || $status >= 300) {
+                throw new ApiException("API request failed with status {$status}", $status);
+            }
+
+            return $response;
+        }
     }
 
     /**
