@@ -114,6 +114,28 @@ Helpers: `isSuccessful()`, `isFailed()`, `isLarger()` (new file is bigger than t
 
 </details>
 
+### Download Converted Images
+
+`save()` streams the converted file of a result to disk, `download()` returns it as a string:
+
+```php
+foreach ($images as $image) {
+    if ($image->isSuccessful()) {
+        $image->save(__DIR__."/converted/{$image->index}.webp", $client); // returns the bytes written
+    }
+}
+
+$content = $images[0]->download($client);
+```
+
+Both also exist on the client: `$client->save($image, $path)` and `$client->download($image)`. Without a `$client`, the `ConvertedImage` methods use a default one, which reads the API token from the environment and downloads anonymously without it. Pass your own client to use its token and `Config`.
+
+- **Allowed URLs:** `outputUrl` must be an https key-value store record URL on the host of `Config::$baseUrl`. Anything else, for example in tampered stored data, throws an `ApiException` before any request.
+- **Token:** it is only sent to that host. Redirects are followed by the library (https only, at most 3), and a redirect target that is not a record URL on that host never gets the token. Error messages and retry events contain no URL.
+- **Files:** the directory must exist. An existing file is only replaced with `overwrite: true`. The data is written to a temporary file in the same directory and moved into place when complete, so a failed download leaves no partial file and keeps the old one. `save()` takes your path as it is: never build it from untrusted values such as `source`.
+- **Limits:** files above `maxBytes` (default `Client::MAX_DOWNLOAD_BYTES`, 256 MiB) are refused, and the size must match `outputBytes` when the row has it. `Config::$timeout` (at least 30 seconds) bounds one download including retries, which follow [Retries and Backoff](#retries-and-backoff); a connection that breaks while the file is read is not retried. Downloads need PHP's `allow_url_fopen` with Guzzle's default handlers.
+- **Errors:** `InvalidArgumentException` (no `outputUrl`, for example a failed row, or an unusable or existing path), `ApiException` (refused or failed download; the code is the HTTP status), `RateLimitException` and `RuntimeException` (the file cannot be written).
+
 ### Images without a result
 
 `convert()` returns one row per processed image. Fewer rows come back on the free plan (first 3 images), with duplicates, at the spending limit or after a shutdown. A row with a `time_limit` error (image skipped for lack of time) counts as processed, it is a failed row, not a missing one. Duplicate URLs and upload keys are processed once, so `index` is the 1-based position in the deduplicated list (URLs first, then upload keys; control characters and surrounding whitespace stripped, a scheme-less URL gets `https://`), not in your original array. `Results` applies the same normalization:

@@ -17,14 +17,20 @@ use ImageConverter\Exception\BatchException;
 use ImageConverter\Exception\MissingApiKeyException;
 use ImageConverter\Exception\RateLimitException;
 use ImageConverter\Exception\SpendingLimitException;
+use ImageConverter\Support\AtomicFile;
+use ImageConverter\Support\Downloader;
 use ImageConverter\Support\Inputs;
 use ImageConverter\Support\Retrier;
 use InvalidArgumentException;
 use JsonException;
+use RuntimeException;
 use Throwable;
 
 final class Client
 {
+    /** Default size limit of `download()` and `save()` in bytes; uncompressed output formats can get large. */
+    public const MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024;
+
     private const MAX_IMAGES = 1000;
 
     private const MAX_DIMENSION = 16000;
@@ -741,6 +747,100 @@ final class Client
         }
 
         return $this->fetchImages($this->datasetId($current->toArray()), $deadline);
+    }
+
+    /**
+     * Download the converted file of a result into memory. See `save()` for large files and for the rules.
+     *
+     * @param  int  $maxBytes  Larger files are refused.
+     * @return string The file content.
+     *
+     * @throws InvalidArgumentException when the result has no file or `$maxBytes` is below 1; nothing was sent
+     * @throws ApiException when `outputUrl` is not allowed or the download fails
+     * @throws RateLimitException
+     * @throws RuntimeException when the data cannot be buffered
+     */
+    public function download(ConvertedImage $image, int $maxBytes = self::MAX_DOWNLOAD_BYTES): string
+    {
+        $url = $this->downloadUrl($image, $maxBytes);
+        $buffer = fopen('php://temp', 'w+b');
+
+        if ($buffer === false) {
+            throw new RuntimeException('Cannot open a temporary buffer');
+        }
+
+        try {
+            $this->fetchFile($image, $url, $buffer, $maxBytes);
+            rewind($buffer);
+
+            return (string) stream_get_contents($buffer);
+        } finally {
+            fclose($buffer);
+        }
+    }
+
+    /**
+     * Stream the converted file of a result to a local file. The file appears only when it is complete.
+     *
+     * `outputUrl` must be an https key-value store record URL on the host of `Config::$baseUrl`; anything else is
+     * refused without a request. The API key, when there is one, is sent to that host only, never to a redirect
+     * target elsewhere. Without a key the download is anonymous. The size must match `outputBytes` when known.
+     * `Config::$timeout` (at least 30 seconds) bounds the download, including retries.
+     *
+     * @param  string  $path  A local file path in an existing directory. Never build it from untrusted values.
+     * @param  bool  $overwrite  False refuses to replace an existing file.
+     * @param  int  $maxBytes  Larger files are refused.
+     * @return int The number of bytes written.
+     *
+     * @throws InvalidArgumentException when the result has no file, `$maxBytes` is below 1 or the path is unusable or
+     *                                  taken; nothing was sent
+     * @throws ApiException when `outputUrl` is not allowed or the download fails
+     * @throws RateLimitException
+     * @throws RuntimeException when the file cannot be written
+     */
+    public function save(
+        ConvertedImage $image,
+        string $path,
+        bool $overwrite = false,
+        int $maxBytes = self::MAX_DOWNLOAD_BYTES,
+    ): int {
+        $url = $this->downloadUrl($image, $maxBytes);
+
+        return AtomicFile::write(
+            $path,
+            $overwrite,
+            fn (mixed $handle): int => $this->fetchFile($image, $url, $handle, $maxBytes),
+        );
+    }
+
+    private function downloadUrl(ConvertedImage $image, int $maxBytes): string
+    {
+        if ($maxBytes < 1) {
+            throw new InvalidArgumentException('maxBytes must be at least 1');
+        }
+
+        if ($image->outputUrl === null || $image->outputUrl === '') {
+            throw new InvalidArgumentException(
+                "Image {$image->index} has no converted file to download (status {$image->status->value})"
+            );
+        }
+
+        return $image->outputUrl;
+    }
+
+    /**
+     * @param  resource  $sink
+     */
+    private function fetchFile(ConvertedImage $image, string $url, mixed $sink, int $maxBytes): int
+    {
+        try {
+            $token = $this->resolveApiKey();
+        } catch (MissingApiKeyException) {
+            $token = null; // record URLs can be public
+        }
+
+        return (new Downloader($this->config, $this->http, $this->retrier))
+            ->download($url, $sink, $token, $maxBytes, $image->outputBytes);
     }
 
     private function validRunId(Run|string $run): string

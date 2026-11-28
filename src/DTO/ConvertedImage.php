@@ -4,11 +4,15 @@ declare(strict_types=1);
 
 namespace ImageConverter\DTO;
 
+use ImageConverter\Client;
 use ImageConverter\ConversionStatus;
+use ImageConverter\Exception\ApiException;
+use ImageConverter\Exception\RateLimitException;
 use ImageConverter\SourceType;
 use ImageConverter\Support\Value;
 use InvalidArgumentException;
 use JsonSerializable;
+use RuntimeException;
 
 final readonly class ConvertedImage implements JsonSerializable
 {
@@ -59,6 +63,41 @@ final readonly class ConvertedImage implements JsonSerializable
             outputHeight: Value::nullableInt($data, 'outputHeight'),
             error: Value::nullableString($data, 'error'),
         );
+    }
+
+    /**
+     * Download the converted file into memory. Short for `Client::download()`.
+     *
+     * @param  Client|null  $client  Pass your configured client; null = a default one, which reads the API key from the
+     *                               environment and downloads anonymously without it.
+     *
+     * @throws InvalidArgumentException
+     * @throws ApiException
+     * @throws RateLimitException
+     * @throws RuntimeException
+     */
+    public function download(?Client $client = null, int $maxBytes = Client::MAX_DOWNLOAD_BYTES): string
+    {
+        return ($client ?? new Client)->download($this, $maxBytes);
+    }
+
+    /**
+     * Save the converted file to `$path`. Short for `Client::save()`, which documents the rules.
+     *
+     * @return int The number of bytes written.
+     *
+     * @throws InvalidArgumentException
+     * @throws ApiException
+     * @throws RateLimitException
+     * @throws RuntimeException
+     */
+    public function save(
+        string $path,
+        ?Client $client = null,
+        bool $overwrite = false,
+        int $maxBytes = Client::MAX_DOWNLOAD_BYTES,
+    ): int {
+        return ($client ?? new Client)->save($this, $path, $overwrite, $maxBytes);
     }
 
     /**
