@@ -16,6 +16,13 @@ use RuntimeException;
 
 final readonly class ConvertedImage implements JsonSerializable
 {
+    /**
+     * The Actor's key format `<index>-<name>.<ext>`, with an image extension. No separator, no leading dot, no control
+     * character and no extension a web server would run.
+     */
+    private const FILENAME_PATTERN =
+        '/\A[0-9]{1,10}-[A-Za-z0-9_.-]{1,200}\.(?:jpg|jpeg|png|webp|avif|gif|tif|tiff|bmp)\z/i';
+
     public function __construct(
         public int $index,
         public string $source,
@@ -63,6 +70,28 @@ final readonly class ConvertedImage implements JsonSerializable
             outputHeight: Value::nullableInt($data, 'outputHeight'),
             error: Value::nullableString($data, 'error'),
         );
+    }
+
+    /**
+     * The file name of the converted file, taken from `outputKey` (`<index>-<name>.<ext>`) and safe to append to a
+     * directory. Null when there is no key or the key has any other form: it is rejected, never rewritten. Names are
+     * unique within one run only.
+     */
+    public function getFilename(): ?string
+    {
+        if ($this->outputKey === null || preg_match(self::FILENAME_PATTERN, $this->outputKey) !== 1) {
+            return null;
+        }
+
+        return $this->outputKey;
+    }
+
+    /** The lower-case extension of `getFilename()` without the dot, e.g. `webp` or `jpg`; null when that is null. */
+    public function getExtension(): ?string
+    {
+        $filename = $this->getFilename();
+
+        return $filename === null ? null : strtolower(pathinfo($filename, PATHINFO_EXTENSION));
     }
 
     /**

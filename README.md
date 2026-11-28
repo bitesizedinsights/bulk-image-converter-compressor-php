@@ -128,6 +128,16 @@ foreach ($images as $image) {
 $content = $images[0]->download($client);
 ```
 
+`getFilename()` returns the name the Actor gave the file (`outputKey`, `<index>-<name>.<ext>`, e.g. `00001-python-logo.webp`) and `getExtension()` its lower-case extension. With `OutputFormat::Original` the extension differs per image, so use it instead of guessing:
+
+```php
+if (($filename = $image->getFilename()) !== null) {
+    $image->save(__DIR__.'/converted/'.$filename, $client);
+}
+```
+
+Both are `null` for rows without a file and for any key not in that form with an image extension (`jpg`, `jpeg`, `png`, `webp`, `avif`, `gif`, `tif`, `tiff`, `bmp`), so a tampered key cannot leave the directory or create a script file. File names are unique within one run only: separate runs, including the batches of `convertMany()`, can produce equal names, and `save()` then refuses to replace the file.
+
 Both also exist on the client: `$client->save($image, $path)` and `$client->download($image)`. Without a `$client`, the `ConvertedImage` methods use a default one, which reads the API token from the environment and downloads anonymously without it. Pass your own client to use its token and `Config`.
 
 - **Allowed URLs:** `outputUrl` must be an https key-value store record URL on the host of `Config::$baseUrl`. Anything else, for example in tampered stored data, throws an `ApiException` before any request.
